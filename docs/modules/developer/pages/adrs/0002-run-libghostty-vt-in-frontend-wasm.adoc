@@ -1,0 +1,22 @@
+= 0002: Run libghostty-vt In Frontend WebAssembly
+
+Status: Accepted
+
+== Context
+
+The terminal foundation should be reusable with Tauri and React. libghostty-vt can be built to WebAssembly and provides terminal state, VT processing, and formatting APIs.
+
+== Decision
+
+Run libghostty-vt as WebAssembly in the React frontend for the bootstrap terminal. Tauri/Rust manages local PTY sessions and transports bytes to and from the frontend.
+
+== Consequences
+
+Terminal state lives close to rendering, and the terminal package can be reused more easily in webview-based projects.
+
+The frontend must manage WebAssembly memory and a low-level libghostty C ABI wrapper. Rendering starts with a minimal canvas strategy.
+
+== Alternatives Considered
+
+* Run native libghostty in Rust: rejected for the bootstrap because render state would need to cross IPC boundaries.
+* Build a native terminal surface: deferred until the React/WebAssembly terminal boundary is better understood.

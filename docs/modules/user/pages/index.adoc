@@ -1,0 +1,11 @@
+= Huginum Cortex
+
+image::brand/huginum-cortex-light.svg[Huginum Cortex,520]
+
+Huginum Cortex is a local agentic development platform.
+
+The first implementation is a standalone terminal backed by libghostty-vt, the terminal engine from Ghostty.
+
+Cortex starts here because local agentic development needs a reliable terminal foundation before higher-level agent workflows, sandboxes, and runtime supervision are layered on top.
+
+See xref:user:embedded-terminal.adoc[Terminal] for what works in the current implementation.

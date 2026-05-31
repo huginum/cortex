@@ -1,0 +1,19 @@
+= Terminal Architecture
+
+The first Cortex terminal implementation uses libghostty from the beginning.
+
+High-level responsibilities:
+
+* React owns the terminal viewport and panel layout.
+* libghostty-vt WebAssembly owns terminal emulation state and plain render extraction.
+* Tauri/Rust owns local PTY session lifecycle, byte transport, resize requests, and terminal setting discovery.
+
+The bootstrap window starts a local shell automatically and closes when that shell exits.
+
+The terminal code is split so future session backends can attach to nerdbox containers without replacing the frontend terminal renderer.
+
+The frontend uses libghostty-vt's mouse encoder so terminal applications can receive mouse escape sequences according to the active terminal mouse mode.
+
+Cortex plans to support existing Ghostty configuration as much as practical. The current implementation keeps terminal settings deliberately small while the renderer and PTY/session architecture stabilize.
+
+Current limitation: rendering starts with libghostty's HTML formatter and basic keyboard input mapping. Selection, mouse input, full Ghostty key encoding, advanced Unicode layout, and full Ghostty configuration compatibility are follow-up work.

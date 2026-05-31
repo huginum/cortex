@@ -1,0 +1,3 @@
+* User Guide
+** xref:user:index.adoc[Overview]
+** xref:user:embedded-terminal.adoc[Terminal]

@@ -1,0 +1,5 @@
+= Developer Guide
+
+Huginum Cortex is a local agentic development platform that starts with a reusable Tauri, React, and libghostty terminal foundation.
+
+This guide explains the local tools, terminal architecture, and architecture decision record policy used while building Cortex.

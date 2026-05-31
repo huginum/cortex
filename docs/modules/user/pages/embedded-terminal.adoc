@@ -1,0 +1,20 @@
+= Terminal
+
+The first Cortex implementation opens directly into one local terminal session backed by libghostty-vt.
+
+The local shell starts automatically when the window opens. Keyboard input is sent to the shell, and shell output is rendered in the app.
+
+When the shell exits, the window closes.
+
+The terminal currently supports the basics expected from a local terminal:
+
+* local shell startup
+* terminal keyboard input
+* scrollback
+* mouse-aware applications such as tmux and Neovim
+* text selection, copy, and paste
+* app-window resize handling
+
+Cortex plans to support your existing Ghostty configuration as much as practical, so users can bring their preferred terminal behavior forward instead of configuring everything again.
+
+This first terminal is intentionally minimal. Tabs, splits, richer Ghostty configuration support, image protocols, and agent-attached terminals are planned follow-up capabilities.

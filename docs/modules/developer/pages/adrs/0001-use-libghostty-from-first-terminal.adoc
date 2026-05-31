@@ -1,0 +1,22 @@
+= 0001: Use libghostty From The First Terminal Implementation
+
+Status: Accepted
+
+== Context
+
+Cortex needs a reusable Tauri, React, and Ghostty terminal foundation. A temporary non-Ghostty terminal would create APIs, rendering assumptions, and tests that later need replacement.
+
+== Decision
+
+Use libghostty from the first embedded terminal implementation.
+
+== Consequences
+
+The first milestone is harder, but the resulting terminal foundation is reusable and aligned with the product direction.
+
+Temporary terminal emulators such as xterm.js are not part of the bootstrap path unless this decision is explicitly revisited.
+
+== Alternatives Considered
+
+* Use a temporary web terminal emulator first: rejected because it creates migration waste.
+* Embed a native Ghostty view first: deferred because it introduces platform-specific work before the reusable React boundary is proven.
