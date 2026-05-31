@@ -1,0 +1,31 @@
+{
+  "name": "cortex",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "predev": "npm run ghostty:wasm",
+    "dev": "vite --host 127.0.0.1",
+    "prebuild": "npm run ghostty:wasm",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "cargo tauri",
+    "tauri:dev": "cargo tauri dev",
+    "tauri:build": "cargo tauri build",
+    "ghostty:wasm": "node scripts/build-libghostty-wasm.mjs",
+    "ghostty:verify": "node scripts/verify-libghostty-wasm.mjs",
+    "docs:build": "antora antora-playbook.yml --stacktrace"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.11.0",
+    "react": "19.2.6",
+    "react-dom": "19.2.6"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.15",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.2",
+    "typescript": "6.0.3",
+    "vite": "8.0.14"
+  }
+}

@@ -1,0 +1,20 @@
+[package]
+name = "cortex"
+version = "0.1.0"
+description = "Cortex desktop app"
+authors = ["Huginum developers", "Tobias Jakobsson"]
+edition = "2024"
+license = "Apache-2.0"
+
+[lib]
+name = "cortex_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.5.1", features = [] }
+
+[dependencies]
+portable-pty = "0.9.0"
+serde = { version = "1.0.228", features = ["derive"] }
+tauri = { version = "2.11.2", features = [] }
+thiserror = "2.0.17"

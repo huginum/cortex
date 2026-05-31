@@ -1,0 +1,419 @@
+import { useEffect, useRef, useState } from 'react';
+import type React from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { GhosttyVt, type TerminalMouseInput, type TerminalSnapshot } from './ghosttyVt';
+import { startLocalTerminal, type TerminalTransport } from './sessionTransport';
+import { drawTerminal, terminalGeometry } from './terminalCanvas';
+import { loadTerminalSettings, terminalStyle, type TerminalSettings } from './terminalSettings';
+
+type TerminalState = 'idle' | 'starting' | 'ready' | 'error' | 'exited';
+
+export function TerminalViewport() {
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const screenRef = useRef<HTMLCanvasElement>(null);
+  const ghosttyRef = useRef<GhosttyVt | null>(null);
+  const transportRef = useRef<TerminalTransport | null>(null);
+  const startedRef = useRef(false);
+  const drawFrameRef = useRef<number | undefined>(undefined);
+  const pressedButtonRef = useRef<TerminalMouseInput['button'] | undefined>(undefined);
+  const selectionRef = useRef<{ start: { x: number; y: number }; mode: 'cell' | 'word' } | undefined>(undefined);
+  const latestSnapshotRef = useRef<TerminalSnapshot | undefined>(undefined);
+  const geometryRef = useRef({ cols: 80, rows: 24, pixelWidth: 640, pixelHeight: 408, cellWidth: 8, cellHeight: 15 });
+  const [state, setState] = useState<TerminalState>('idle');
+  const [hasFrame, setHasFrame] = useState(false);
+  const [settings, setSettings] = useState<TerminalSettings>({});
+  const [cellWidth, setCellWidth] = useState(8);
+  const [terminalBackground, setTerminalBackground] = useState('#090e1d');
+
+  useEffect(() => {
+    void loadTerminalSettings().then(setSettings);
+
+    return () => {
+      if (drawFrameRef.current !== undefined) cancelAnimationFrame(drawFrameRef.current);
+      transportRef.current?.dispose();
+      void transportRef.current?.stop();
+      ghosttyRef.current?.dispose();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (startedRef.current || state !== 'idle') return;
+    startedRef.current = true;
+    void start();
+  }, [state]);
+
+  async function start() {
+    if (!viewportRef.current || state === 'starting' || state === 'ready') return;
+
+    setState('starting');
+
+    try {
+      await waitForTerminalLayout();
+      const geometry = updateGeometry();
+      if (!geometry) return;
+      const { cols, rows, pixelWidth, pixelHeight } = geometry;
+      const ghostty = await GhosttyVt.create(cols, rows);
+      ghosttyRef.current = ghostty;
+
+      const transport = await startLocalTerminal(
+        cols,
+        rows,
+        pixelWidth,
+        pixelHeight,
+        (data) => {
+          ghostty.clearSelection();
+          ghostty.write(data);
+          queueDraw();
+        },
+        () => {
+          setState('exited');
+          void invoke('quit_app');
+        },
+      );
+      transportRef.current = transport;
+      setState('ready');
+      draw();
+      requestAnimationFrame(() => viewportRef.current?.focus());
+      queueResizeSync();
+    } catch {
+      setState('error');
+    }
+  }
+
+  function draw() {
+    if (!ghosttyRef.current) return;
+    const snapshot = ghosttyRef.current.snapshot();
+    latestSnapshotRef.current = snapshot;
+    setTerminalBackground(snapshot.background);
+    if (screenRef.current) drawTerminal(screenRef.current, snapshot);
+    setHasFrame(true);
+  }
+
+  function queueDraw() {
+    if (drawFrameRef.current !== undefined) return;
+
+    drawFrameRef.current = requestAnimationFrame(() => {
+      drawFrameRef.current = undefined;
+      try {
+        draw();
+      } catch {
+        setState('error');
+      }
+    });
+  }
+
+  function drawPreservingContent() {
+    if (!ghosttyRef.current) return;
+    const snapshot = ghosttyRef.current.snapshot();
+    latestSnapshotRef.current = snapshot;
+    setTerminalBackground(snapshot.background);
+    if (screenRef.current) drawTerminal(screenRef.current, snapshot);
+    setHasFrame(true);
+  }
+
+  function updateGeometry() {
+    if (!viewportRef.current) return null;
+    const geometry = terminalGeometry(viewportRef.current);
+    geometryRef.current = geometry;
+    setCellWidth(geometry.cellWidth);
+    return geometry;
+  }
+
+  useEffect(() => {
+    if (!hasFrame || !ghosttyRef.current || !screenRef.current) return;
+    drawTerminal(screenRef.current, ghosttyRef.current.snapshot());
+  }, [cellWidth, terminalBackground, settings, hasFrame]);
+
+  async function resize() {
+    if (!viewportRef.current || !ghosttyRef.current || !transportRef.current) return;
+    const geometry = terminalGeometry(viewportRef.current);
+    const { cols, rows, pixelWidth, pixelHeight, cellWidth, cellHeight } = geometry;
+    const last = geometryRef.current;
+    const gridChanged = last.cols !== cols || last.rows !== rows || last.cellWidth !== cellWidth || last.cellHeight !== cellHeight;
+    if (!gridChanged) {
+      geometryRef.current = geometry;
+      drawPreservingContent();
+      return;
+    }
+
+    geometryRef.current = geometry;
+    setCellWidth(cellWidth);
+    ghosttyRef.current.scrollToBottom();
+    ghosttyRef.current.resize(cols, rows, cellWidth, cellHeight);
+    await transportRef.current.resize(cols, rows, pixelWidth, pixelHeight);
+    ghosttyRef.current.scrollToBottom();
+    drawPreservingContent();
+    requestAnimationFrame(() => drawPreservingContent());
+  }
+
+  function queueResizeSync() {
+    requestAnimationFrame(() => {
+      void resize();
+      window.setTimeout(() => void resize(), 80);
+      window.setTimeout(() => void resize(), 240);
+    });
+  }
+
+  async function onKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (!ghosttyRef.current || !transportRef.current) return;
+
+    if (event.metaKey && event.key.toLowerCase() === 'c' && copySelection()) {
+      event.preventDefault();
+      return;
+    }
+    if (event.metaKey && event.key.toLowerCase() === 'v') {
+      event.preventDefault();
+      await pasteText(await navigator.clipboard?.readText());
+      return;
+    }
+
+    let input = encodeKey(event);
+    if (!input) return;
+
+    event.preventDefault();
+    ghosttyRef.current.clearSelection();
+    ghosttyRef.current.scrollToBottom();
+    await transportRef.current.write(ghosttyRef.current.encodeTextInput(input));
+  }
+
+  async function onMouseDown(event: React.MouseEvent<HTMLDivElement>) {
+    if (event.button === 0 && ghosttyRef.current && !ghosttyRef.current.mouseTrackingActive()) {
+      event.preventDefault();
+      viewportRef.current?.focus();
+      const point = terminalPoint(event, viewportRef.current, geometryRef.current);
+      if (event.detail >= 2) {
+        selectionRef.current = { start: point, mode: 'word' };
+        ghosttyRef.current.selectWordAt(point);
+        draw();
+        return;
+      }
+
+      selectionRef.current = { start: point, mode: 'cell' };
+      ghosttyRef.current.selectViewportRange(point, point);
+      draw();
+      return;
+    }
+
+    const button = mouseButton(event.button);
+    pressedButtonRef.current = button;
+    await writeMouse(event, 'press', button);
+  }
+
+  async function onMouseUp(event: React.MouseEvent<HTMLDivElement>) {
+    if (selectionRef.current && ghosttyRef.current) {
+      event.preventDefault();
+      const end = terminalPoint(event, viewportRef.current, geometryRef.current);
+      if (selectionRef.current.mode === 'word') {
+        ghosttyRef.current.selectWordsBetween(selectionRef.current.start, end);
+      } else {
+        ghosttyRef.current.selectViewportRange(selectionRef.current.start, end);
+      }
+      selectionRef.current = undefined;
+      draw();
+      return;
+    }
+
+    const button = mouseButton(event.button) ?? pressedButtonRef.current;
+    pressedButtonRef.current = undefined;
+    await writeMouse(event, 'release', button);
+  }
+
+  async function onMouseMove(event: React.MouseEvent<HTMLDivElement>) {
+    if (selectionRef.current && ghosttyRef.current) {
+      event.preventDefault();
+      const end = terminalPoint(event, viewportRef.current, geometryRef.current);
+      if (selectionRef.current.mode === 'word') {
+        ghosttyRef.current.selectWordsBetween(selectionRef.current.start, end);
+      } else {
+        ghosttyRef.current.selectViewportRange(selectionRef.current.start, end);
+      }
+      draw();
+      return;
+    }
+
+    if (event.buttons === 0 && !pressedButtonRef.current) return;
+    await writeMouse(event, 'motion', pressedButtonRef.current);
+  }
+
+  async function onWheel(event: React.WheelEvent<HTMLDivElement>) {
+    event.preventDefault();
+    if (!ghosttyRef.current) return;
+
+    if (!ghosttyRef.current.mouseTrackingActive()) {
+      ghosttyRef.current.scrollViewport(event.deltaY < 0 ? -3 : 3);
+      draw();
+      return;
+    }
+
+    const button = event.deltaY < 0 ? 'wheelUp' : 'wheelDown';
+    await writeMouse(event, 'press', button);
+  }
+
+  async function writeMouse(
+    event: React.MouseEvent<HTMLDivElement> | React.WheelEvent<HTMLDivElement>,
+    action: TerminalMouseInput['action'],
+    button: TerminalMouseInput['button'],
+  ) {
+    if (!viewportRef.current || !ghosttyRef.current || !transportRef.current) return;
+
+    const input = mouseInput(event, viewportRef.current, geometryRef.current, action, button);
+    const encoded = ghosttyRef.current.encodeMouseInput(input);
+    if (encoded.length === 0) return;
+
+    event.preventDefault();
+    viewportRef.current.focus();
+    await transportRef.current.write(encoded);
+  }
+
+  async function pasteText(text: string | undefined) {
+    if (!text || !ghosttyRef.current || !transportRef.current) return;
+
+    ghosttyRef.current.clearSelection();
+    ghosttyRef.current.scrollToBottom();
+    await transportRef.current.write(ghosttyRef.current.encodePasteInput(text));
+    draw();
+  }
+
+  function encodeKey(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (event.ctrlKey && event.key.length === 1) {
+      const code = event.key.toUpperCase().charCodeAt(0);
+      if (code >= 64 && code <= 95) return String.fromCharCode(code - 64);
+    }
+
+    let input = event.key.length === 1 ? event.key : '';
+    if (event.key === 'Enter') input = '\r';
+    if (event.key === 'Backspace') input = '\x7f';
+    if (event.key === 'Tab') input = '\t';
+    if (event.key === 'Escape') input = '\x1b';
+    if (event.key === 'ArrowUp') input = '\x1b[A';
+    if (event.key === 'ArrowDown') input = '\x1b[B';
+    if (event.key === 'ArrowRight') input = '\x1b[C';
+    if (event.key === 'ArrowLeft') input = '\x1b[D';
+    return input;
+  }
+
+  useEffect(() => {
+    void document.fonts?.ready.then(() => {
+      if (state === 'ready') void resize();
+      else updateGeometry();
+    });
+  }, [settings, state]);
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+
+    const observer = new ResizeObserver(() => {
+      if (state === 'ready') void resize();
+    });
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, [state]);
+
+  function copySelection() {
+    const text = selectedText(latestSnapshotRef.current);
+    if (!text) return false;
+
+    void navigator.clipboard?.writeText(text);
+    return true;
+  }
+
+  return (
+    <section className="terminal-card">
+      <div
+        ref={viewportRef}
+        className="terminal-viewport"
+        style={{ ...terminalStyle(settings), '--terminal-cell-width': `${cellWidth}px`, '--terminal-background': terminalBackground } as React.CSSProperties}
+        tabIndex={0}
+        onKeyDown={onKeyDown}
+        onMouseDown={onMouseDown}
+        onMouseUp={onMouseUp}
+        onMouseMove={onMouseMove}
+        onWheel={onWheel}
+        onContextMenu={(event) => event.preventDefault()}
+        onCopy={(event) => {
+          const text = selectedText(latestSnapshotRef.current);
+          if (!text) return;
+          event.clipboardData.setData('text/plain', text);
+          event.preventDefault();
+        }}
+        onPaste={(event) => {
+          event.preventDefault();
+          void pasteText(event.clipboardData.getData('text/plain'));
+        }}
+        aria-label="Embedded terminal viewport"
+      >
+        {hasFrame ? (
+          <canvas ref={screenRef} className="terminal-screen" />
+        ) : (
+          <div className="terminal-placeholder">Starting shell...</div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function terminalPoint(
+  event: React.MouseEvent<HTMLDivElement>,
+  viewport: HTMLDivElement | null,
+  geometry: ReturnType<typeof terminalGeometry>,
+) {
+  if (!viewport) return { x: 0, y: 0 };
+  const rect = viewport.getBoundingClientRect();
+  return {
+    x: Math.floor((event.clientX - rect.left - 10) / geometry.cellWidth),
+    y: Math.floor((event.clientY - rect.top - 10) / geometry.cellHeight),
+  };
+}
+
+function selectedText(snapshot: TerminalSnapshot | undefined) {
+  if (!snapshot) return '';
+
+  return snapshot.cells
+    .map((row) => row.filter((cell) => cell.selected).map((cell) => cell.text || ' ').join('').trimEnd())
+    .filter((line) => line.length > 0)
+    .join('\n');
+}
+
+async function waitForTerminalLayout() {
+  await document.fonts?.ready;
+  await nextFrame();
+  await nextFrame();
+}
+
+function nextFrame() {
+  return new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+}
+
+function mouseInput(
+  event: React.MouseEvent<HTMLDivElement> | React.WheelEvent<HTMLDivElement>,
+  viewport: HTMLDivElement,
+  geometry: ReturnType<typeof terminalGeometry>,
+  action: TerminalMouseInput['action'],
+  button: TerminalMouseInput['button'],
+): TerminalMouseInput {
+  const rect = viewport.getBoundingClientRect();
+  return {
+    action,
+    button,
+    x: event.clientX - rect.left,
+    y: event.clientY - rect.top,
+    screenWidth: viewport.clientWidth,
+    screenHeight: viewport.clientHeight,
+    cellWidth: geometry.cellWidth,
+    cellHeight: geometry.cellHeight,
+    mods: {
+      shift: event.shiftKey,
+      ctrl: event.ctrlKey,
+      alt: event.altKey,
+      super: event.metaKey,
+    },
+  };
+}
+
+function mouseButton(button: number): TerminalMouseInput['button'] {
+  if (button === 0) return 'left';
+  if (button === 1) return 'middle';
+  if (button === 2) return 'right';
+  return undefined;
+}

@@ -1,0 +1,16 @@
+<nav class="navbar" aria-label="main navigation">
+  <div class="navbar-brand">
+    <a class="navbar-item" href="{{{or site.url siteRootPath}}}">Cortex Docs</a>
+    <button class="navbar-burger" data-target="topbar-nav" aria-label="Toggle navigation">
+      <span></span>
+      <span></span>
+      <span></span>
+    </button>
+  </div>
+  <div id="topbar-nav" class="navbar-menu">
+    <div class="navbar-end">
+      <a class="navbar-item" href="{{{relativize (resolvePageURL 'user:index.adoc')}}}">User Guide</a>
+      <a class="navbar-item" href="{{{relativize (resolvePageURL 'developer:index.adoc')}}}">Developer Guide</a>
+    </div>
+  </div>
+</nav>

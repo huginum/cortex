@@ -1,0 +1,14 @@
+= ADR Policy
+
+Architecture-significant decisions are recorded as ADRs in the developer guide under `modules/developer/pages/adrs/`.
+
+Create an ADR when a change affects major layers, packaging, security model, terminal architecture, runtime supervision, or dependency strategy.
+
+Use these status values:
+
+* Proposed
+* Accepted
+* Superseded
+* Deprecated
+
+Each ADR should stay short and include context, decision, consequences, and alternatives considered. OpenSpec tasks should include ADR work when a change makes or revises an architecture-significant decision.

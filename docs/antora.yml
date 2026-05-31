@@ -1,0 +1,7 @@
+name: cortex
+title: Cortex
+version: ~
+start_page: user:index.adoc
+nav:
+  - modules/developer/nav.adoc
+  - modules/user/nav.adoc
