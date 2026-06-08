@@ -21,11 +21,10 @@ The recent-projects list already lives outside any repository, in the applicatio
 ## Decisions
 
 ### Store layout in the app config dir, keyed by canonical repo path
-Layout files live under `app_config_dir()/layouts/`, one file per project named `<hash>.json`, where `<hash>` is a stable hash (Rust `std::hash::DefaultHasher` over the canonical repository root string, rendered as hex). The canonical root is stored *inside* each file alongside the layout JSON; on read, if the stored root does not match the requested project's canonical root, the entry is treated as a miss (defensive against the small chance of a hash collision). Canonicalization uses the same repo root the rest of the project flow already resolves.
+Layouts live in a single `app_config_dir()/layouts.json` file — a JSON object mapping each project's canonical repository root path to its layout — the same shape and location pattern as the recent-projects list (`projects.json`). Canonicalization uses the same repo root the rest of the project flow already resolves.
 
-- Why a hash filename rather than the raw path: repository paths contain `/` and other characters that are not safe, portable filenames. A hash maps any path to a fixed, filesystem-safe name.
-- Why `DefaultHasher` rather than a cryptographic hash: the hash only needs to produce a stable, well-distributed filename, not resist adversarial collisions — the stored-root check inside the file resolves any collision deterministically. This avoids adding a hashing crate.
-- Why one file per project rather than a single keyed map: writes stay small and isolated; there is no read-modify-write of a shared document. (The app opens one project at a time today, but per-file storage is also forward-compatible with multiple windows.)
+- Why a single keyed map rather than one file per project: the key is the canonical root path string itself, so there is no hashing and therefore no dependence on a hash algorithm's stability and no collision handling to get right. It also avoids filesystem name-length limits for deep repository paths, and mirrors how `projects.json` already works. Read-modify-write of the whole map is negligible — layouts are tiny, saves are debounced, and the app opens one project at a time.
+- Rejected: a `<hash>.json`-per-project scheme using `std::hash::DefaultHasher`. `DefaultHasher` (SipHash) is documented as *not* guaranteed stable across Rust/std releases or platforms, so an upgrade could change the computed filename and orphan every saved layout. (This was the initial implementation; review correctly flagged the stability hazard and it was replaced by the keyed map above.)
 
 Alternative considered: a true OS cache directory (`app_cache_dir()`). Rejected — a cache dir implies disposable, OS-purgeable data; a layout is persistent state the user expects to survive, so the config/data dir is the correct bucket.
 
@@ -44,7 +43,7 @@ The project view debounces saves by 300 ms. Its cleanup currently clears the pen
 
 ## Migration Plan
 
-1. Re-target `read_layout`/`write_layout` to the app config `layouts/` dir keyed by canonical repo path; add the stored-root collision check.
+1. Re-target `read_layout`/`write_layout` to a single `app_config_dir()/layouts.json` map keyed by canonical repo path.
 2. Delete the in-repo I/O layer (`resolve_cortex_dir`, `*_in_dir`, `open_dir_nofollow`, `DirFd`) and the unix hardening tests; drop `libc`.
 3. Flush the debounced save on unmount in `ProjectView`.
 4. Update ADR 0003 (supersede the layout-storage / git sections) and the developer + user docs.

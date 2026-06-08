@@ -187,15 +187,11 @@ pub fn clone_project(
     open_project(app, dest)
 }
 
-/// A persisted layout, stored in Cortex's own config directory rather than in
-/// the repository. The canonical repository root is recorded alongside the
-/// layout so a hash-filename collision (or a stale entry) is detected on read
-/// and treated as a miss.
-#[derive(Serialize, Deserialize)]
-struct StoredLayout {
-    root: String,
-    layout: serde_json::Value,
-}
+/// Layouts are stored as a single JSON object keyed by canonical repository
+/// root path — the same shape as the recent-projects list. Keying by the path
+/// string itself (rather than a hash filename) keeps the mapping stable across
+/// Rust/std versions and avoids filesystem name-length limits.
+type LayoutMap = std::collections::BTreeMap<String, serde_json::Value>;
 
 /// Read a project's saved layout, if any. Returns the raw JSON document so the
 /// frontend owns its shape. Layout lives in the application config directory,
@@ -203,25 +199,24 @@ struct StoredLayout {
 /// read.
 #[tauri::command]
 pub fn read_layout(app: AppHandle, root: String) -> Option<String> {
-    read_layout_in(&layouts_dir(&app).ok()?, &root)
+    read_layout_at(&layouts_path(&app).ok()?, &root)
 }
 
 /// Persist a project's layout in the application config directory, keyed by the
 /// canonical repository root. Cortex never writes inside the repository.
 #[tauri::command]
 pub fn write_layout(app: AppHandle, root: String, contents: String) -> Result<(), ProjectError> {
-    write_layout_in(&layouts_dir(&app)?, &root, &contents)
+    write_layout_at(&layouts_path(&app)?, &root, &contents)
 }
 
-/// The `layouts/` directory under the app config dir, created if absent.
-fn layouts_dir(app: &AppHandle) -> Result<PathBuf, ProjectError> {
+/// The `layouts.json` file under the app config dir (sibling to `projects.json`).
+fn layouts_path(app: &AppHandle) -> Result<PathBuf, ProjectError> {
     let dir = app
         .path()
         .app_config_dir()
-        .map_err(|error| ProjectError::Io(error.to_string()))?
-        .join("layouts");
+        .map_err(|error| ProjectError::Io(error.to_string()))?;
     fs::create_dir_all(&dir).map_err(|error| ProjectError::Io(error.to_string()))?;
-    Ok(dir)
+    Ok(dir.join("layouts.json"))
 }
 
 /// Canonicalize a repository root to a stable string key (resolves symlinks and
@@ -236,38 +231,28 @@ fn canonical_root(root: &str) -> Result<String, ProjectError> {
         .ok_or_else(|| ProjectError::Io("repository path is not valid UTF-8".into()))
 }
 
-/// The layout file for a project: `<dir>/<hash-of-canonical-root>.json`. The
-/// hash only needs to produce a stable, filesystem-safe name; the canonical
-/// root stored inside the file resolves any collision deterministically.
-fn layout_file(dir: &Path, canonical: &str) -> PathBuf {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    canonical.hash(&mut hasher);
-    dir.join(format!("{:016x}.json", hasher.finish()))
+fn read_layouts(path: &Path) -> LayoutMap {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|data| serde_json::from_str(&data).ok())
+        .unwrap_or_default()
 }
 
-fn read_layout_in(dir: &Path, root: &str) -> Option<String> {
+fn read_layout_at(path: &Path, root: &str) -> Option<String> {
     let canonical = canonical_root(root).ok()?;
-    let data = fs::read_to_string(layout_file(dir, &canonical)).ok()?;
-    let stored: StoredLayout = serde_json::from_str(&data).ok()?;
-    // Guard against a hash collision or a stale/foreign entry.
-    if stored.root != canonical {
-        return None;
-    }
-    serde_json::to_string(&stored.layout).ok()
+    let map = read_layouts(path);
+    serde_json::to_string(map.get(&canonical)?).ok()
 }
 
-fn write_layout_in(dir: &Path, root: &str, contents: &str) -> Result<(), ProjectError> {
+fn write_layout_at(path: &Path, root: &str, contents: &str) -> Result<(), ProjectError> {
     let canonical = canonical_root(root)?;
     let layout: serde_json::Value = serde_json::from_str(contents)
         .map_err(|error| ProjectError::Io(format!("invalid layout JSON: {error}")))?;
-    let stored = StoredLayout {
-        root: canonical.clone(),
-        layout,
-    };
+    let mut map = read_layouts(path);
+    map.insert(canonical, layout);
     let data =
-        serde_json::to_string_pretty(&stored).map_err(|error| ProjectError::Io(error.to_string()))?;
-    fs::write(layout_file(dir, &canonical), data).map_err(|error| ProjectError::Io(error.to_string()))
+        serde_json::to_string_pretty(&map).map_err(|error| ProjectError::Io(error.to_string()))?;
+    fs::write(path, data).map_err(|error| ProjectError::Io(error.to_string()))
 }
 
 #[cfg(test)]
@@ -295,14 +280,13 @@ mod tests {
     #[test]
     fn layout_round_trips_through_local_storage() {
         let tmp = TempDir::new(line!());
-        let store = tmp.0.join("layouts");
-        fs::create_dir_all(&store).unwrap();
+        let store = tmp.0.join("layouts.json");
         let repo = tmp.0.join("repo");
         fs::create_dir_all(&repo).unwrap();
 
-        write_layout_in(&store, repo.to_str().unwrap(), "{\"type\":\"pane\",\"cwd\":\".\"}").unwrap();
+        write_layout_at(&store, repo.to_str().unwrap(), "{\"type\":\"pane\",\"cwd\":\".\"}").unwrap();
 
-        let restored = read_layout_in(&store, repo.to_str().unwrap()).unwrap();
+        let restored = read_layout_at(&store, repo.to_str().unwrap()).unwrap();
         let value: serde_json::Value = serde_json::from_str(&restored).unwrap();
         assert_eq!(value["type"], "pane");
         assert_eq!(value["cwd"], ".");
@@ -311,63 +295,60 @@ mod tests {
     #[test]
     fn layout_is_not_written_inside_the_repository() {
         let tmp = TempDir::new(line!());
-        let store = tmp.0.join("layouts");
-        fs::create_dir_all(&store).unwrap();
+        let store = tmp.0.join("layouts.json");
         let repo = tmp.0.join("repo");
         fs::create_dir_all(&repo).unwrap();
 
-        write_layout_in(&store, repo.to_str().unwrap(), "{\"type\":\"pane\"}").unwrap();
+        write_layout_at(&store, repo.to_str().unwrap(), "{\"type\":\"pane\"}").unwrap();
 
-        // The layout lives under the store, never in the repo.
+        // The layout lives in the store file, never in the repo.
         assert!(!repo.join(".cortex").exists());
-        assert!(fs::read_dir(&store).unwrap().next().is_some());
+        assert!(store.is_file());
     }
 
     #[test]
     fn layout_is_scoped_to_its_repository() {
         let tmp = TempDir::new(line!());
-        let store = tmp.0.join("layouts");
-        fs::create_dir_all(&store).unwrap();
+        let store = tmp.0.join("layouts.json");
         let repo_a = tmp.0.join("repo-a");
         let repo_b = tmp.0.join("repo-b");
         fs::create_dir_all(&repo_a).unwrap();
         fs::create_dir_all(&repo_b).unwrap();
 
-        write_layout_in(&store, repo_a.to_str().unwrap(), "{\"type\":\"pane\"}").unwrap();
+        write_layout_at(&store, repo_a.to_str().unwrap(), "{\"type\":\"pane\"}").unwrap();
 
         // A different repository has no layout of its own.
-        assert_eq!(read_layout_in(&store, repo_b.to_str().unwrap()), None);
+        assert_eq!(read_layout_at(&store, repo_b.to_str().unwrap()), None);
+    }
+
+    #[test]
+    fn multiple_repositories_coexist_in_the_store() {
+        let tmp = TempDir::new(line!());
+        let store = tmp.0.join("layouts.json");
+        let repo_a = tmp.0.join("repo-a");
+        let repo_b = tmp.0.join("repo-b");
+        fs::create_dir_all(&repo_a).unwrap();
+        fs::create_dir_all(&repo_b).unwrap();
+
+        write_layout_at(&store, repo_a.to_str().unwrap(), "{\"type\":\"pane\",\"cwd\":\"a\"}").unwrap();
+        write_layout_at(&store, repo_b.to_str().unwrap(), "{\"type\":\"pane\",\"cwd\":\"b\"}").unwrap();
+
+        // Writing repo-b's layout must not clobber repo-a's.
+        let a: serde_json::Value =
+            serde_json::from_str(&read_layout_at(&store, repo_a.to_str().unwrap()).unwrap()).unwrap();
+        let b: serde_json::Value =
+            serde_json::from_str(&read_layout_at(&store, repo_b.to_str().unwrap()).unwrap()).unwrap();
+        assert_eq!(a["cwd"], "a");
+        assert_eq!(b["cwd"], "b");
     }
 
     #[test]
     fn missing_layout_reads_as_none() {
         let tmp = TempDir::new(line!());
-        let store = tmp.0.join("layouts");
-        fs::create_dir_all(&store).unwrap();
+        let store = tmp.0.join("layouts.json");
         let repo = tmp.0.join("repo");
         fs::create_dir_all(&repo).unwrap();
 
-        assert_eq!(read_layout_in(&store, repo.to_str().unwrap()), None);
-    }
-
-    #[test]
-    fn root_mismatch_in_file_reads_as_none() {
-        let tmp = TempDir::new(line!());
-        let store = tmp.0.join("layouts");
-        fs::create_dir_all(&store).unwrap();
-        let repo = tmp.0.join("repo");
-        fs::create_dir_all(&repo).unwrap();
-
-        // Simulate a hash collision: a file at the repo's key whose stored root
-        // belongs to a different project must be treated as a miss.
-        let canonical = canonical_root(repo.to_str().unwrap()).unwrap();
-        let data = serde_json::to_string(&StoredLayout {
-            root: "/some/other/repo".into(),
-            layout: serde_json::json!({"type": "pane"}),
-        })
-        .unwrap();
-        fs::write(layout_file(&store, &canonical), data).unwrap();
-
-        assert_eq!(read_layout_in(&store, repo.to_str().unwrap()), None);
+        assert_eq!(read_layout_at(&store, repo.to_str().unwrap()), None);
     }
 }
