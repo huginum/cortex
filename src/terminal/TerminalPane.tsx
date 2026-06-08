@@ -26,6 +26,9 @@ export function TerminalPane({ cwd, root, onExit, focused, onFocus }: TerminalPa
   const ghosttyRef = useRef<GhosttyVt | null>(null);
   const transportRef = useRef<TerminalTransport | null>(null);
   const startedRef = useRef(false);
+  // Set when the component unmounts so an in-flight start() can tear down a
+  // backend session that resolves after we're gone, rather than leaking it.
+  const cancelledRef = useRef(false);
   const drawFrameRef = useRef<number | undefined>(undefined);
   const pressedButtonRef = useRef<TerminalMouseInput['button'] | undefined>(undefined);
   const selectionRef = useRef<{ start: { x: number; y: number }; mode: 'cell' | 'word' } | undefined>(undefined);
@@ -42,6 +45,7 @@ export function TerminalPane({ cwd, root, onExit, focused, onFocus }: TerminalPa
     void loadTerminalSettings().then(setSettings);
 
     return () => {
+      cancelledRef.current = true;
       if (drawFrameRef.current !== undefined) cancelAnimationFrame(drawFrameRef.current);
       transportRef.current?.dispose();
       void transportRef.current?.stop();
@@ -80,6 +84,10 @@ export function TerminalPane({ cwd, root, onExit, focused, onFocus }: TerminalPa
       if (!geometry) return;
       const { cols, rows, pixelWidth, pixelHeight } = geometry;
       const ghostty = await GhosttyVt.create(cols, rows);
+      if (cancelledRef.current) {
+        ghostty.dispose();
+        return;
+      }
       ghosttyRef.current = ghostty;
 
       const transport = await startLocalTerminal(
@@ -99,6 +107,13 @@ export function TerminalPane({ cwd, root, onExit, focused, onFocus }: TerminalPa
         cwd,
         root,
       );
+      if (cancelledRef.current) {
+        // Unmounted while the backend session was being created; tear it down
+        // so we never leave an orphaned PTY attached to a dead component.
+        transport.dispose();
+        void transport.stop();
+        return;
+      }
       transportRef.current = transport;
       setState('ready');
       draw();

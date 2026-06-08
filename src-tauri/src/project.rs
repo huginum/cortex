@@ -209,14 +209,129 @@ fn resolve_cortex_dir(root: &Path, create: bool) -> Result<PathBuf, ProjectError
     }
 }
 
+const LAYOUT_FILE: &str = "layout.json";
+
 /// Read a project's saved layout, if any. Returns the raw JSON document so the
 /// frontend owns its shape. `.cortex` and `layout.json` are repo-controlled, so
-/// a symlinked directory or file is ignored rather than followed (which could
+/// neither a symlinked directory nor a symlinked file is followed (which could
 /// otherwise read an arbitrary file's contents into the app).
 #[tauri::command]
 pub fn read_layout(root: String) -> Option<String> {
     let dir = resolve_cortex_dir(Path::new(&root), false).ok()?;
-    let file = dir.join("layout.json");
+    read_in_dir(&dir, LAYOUT_FILE)
+}
+
+/// Persist a project's layout under `<root>/.cortex/layout.json`.
+#[tauri::command]
+pub fn write_layout(root: String, contents: String) -> Result<(), ProjectError> {
+    let dir = resolve_cortex_dir(Path::new(&root), true)?;
+    write_in_dir(&dir, LAYOUT_FILE, &contents)
+}
+
+/// Read `name` inside `dir` without following a symlink at either the directory
+/// or the file. On Unix the directory is opened with `O_NOFOLLOW | O_DIRECTORY`
+/// and the file is opened relative to that pinned fd, so swapping `.cortex` for
+/// a symlink after it was validated cannot redirect the read outside the repo.
+#[cfg(unix)]
+fn read_in_dir(dir: &Path, name: &str) -> Option<String> {
+    use std::io::Read;
+    use std::os::unix::io::FromRawFd;
+
+    let dirfd = open_dir_nofollow(dir).ok()?;
+    let name_c = std::ffi::CString::new(name).ok()?;
+    let fd = unsafe {
+        libc::openat(
+            dirfd.0,
+            name_c.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return None;
+    }
+    let mut file = unsafe { fs::File::from_raw_fd(fd) };
+    let mut buf = String::new();
+    file.read_to_string(&mut buf).ok()?;
+    Some(buf)
+}
+
+/// Write `contents` to `name` inside `dir`, never following a symlink at the
+/// directory or the file. On Unix the parent directory is opened first with
+/// `O_NOFOLLOW | O_DIRECTORY` and all subsequent operations go through that
+/// pinned fd via `*at` syscalls, so a racing swap of `.cortex` for a symlink
+/// after validation cannot redirect the write. Any pre-existing symlink at
+/// `name` is unlinked first (the link, not its target) so a malicious file is
+/// replaced by a fresh regular file.
+#[cfg(unix)]
+fn write_in_dir(dir: &Path, name: &str, contents: &str) -> Result<(), ProjectError> {
+    use std::io::Write;
+    use std::os::unix::io::FromRawFd;
+
+    let dirfd = open_dir_nofollow(dir)?;
+    let name_c =
+        std::ffi::CString::new(name).map_err(|_| ProjectError::Io("name contains NUL".into()))?;
+
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    let statted =
+        unsafe { libc::fstatat(dirfd.0, name_c.as_ptr(), &mut stat, libc::AT_SYMLINK_NOFOLLOW) };
+    if statted == 0 && (stat.st_mode & libc::S_IFMT) == libc::S_IFLNK {
+        unsafe { libc::unlinkat(dirfd.0, name_c.as_ptr(), 0) };
+    }
+
+    let fd = unsafe {
+        libc::openat(
+            dirfd.0,
+            name_c.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o644,
+        )
+    };
+    if fd < 0 {
+        return Err(ProjectError::Io(
+            std::io::Error::last_os_error().to_string(),
+        ));
+    }
+    let mut file = unsafe { fs::File::from_raw_fd(fd) };
+    file.write_all(contents.as_bytes())
+        .map_err(|error| ProjectError::Io(error.to_string()))
+}
+
+/// An owned directory file descriptor, closed on drop.
+#[cfg(unix)]
+struct DirFd(i32);
+
+#[cfg(unix)]
+impl Drop for DirFd {
+    fn drop(&mut self) {
+        unsafe { libc::close(self.0) };
+    }
+}
+
+/// Open `dir` itself as a directory fd without following a symlink. Pinning the
+/// directory inode means later `*at` operations cannot be redirected by swapping
+/// the directory for a symlink after this point.
+#[cfg(unix)]
+fn open_dir_nofollow(dir: &Path) -> Result<DirFd, ProjectError> {
+    use std::os::unix::ffi::OsStrExt;
+    let dir_c = std::ffi::CString::new(dir.as_os_str().as_bytes())
+        .map_err(|_| ProjectError::Io("path contains NUL".into()))?;
+    let fd = unsafe {
+        libc::open(
+            dir_c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(ProjectError::Io(
+            std::io::Error::last_os_error().to_string(),
+        ));
+    }
+    Ok(DirFd(fd))
+}
+
+#[cfg(not(unix))]
+fn read_in_dir(dir: &Path, name: &str) -> Option<String> {
+    let file = dir.join(name);
     let meta = fs::symlink_metadata(&file).ok()?;
     if meta.file_type().is_symlink() || !meta.is_file() {
         return None;
@@ -224,47 +339,15 @@ pub fn read_layout(root: String) -> Option<String> {
     fs::read_to_string(&file).ok()
 }
 
-/// Persist a project's layout under `<root>/.cortex/layout.json`.
-#[tauri::command]
-pub fn write_layout(root: String, contents: String) -> Result<(), ProjectError> {
-    let dir = resolve_cortex_dir(Path::new(&root), true)?;
-    let file = dir.join("layout.json");
-    write_no_follow(&file, &contents).map_err(|error| ProjectError::Io(error.to_string()))
-}
-
-/// Write `contents` to `path`, creating or truncating a regular file and never
-/// following a symlink at the final component. On Unix this opens with
-/// `O_NOFOLLOW` so the no-follow guarantee is atomic with the open — a symlink
-/// raced into place cannot redirect the write outside the repo (the open fails
-/// instead). A pre-existing symlink is unlinked first (the link, not its
-/// target) so a malicious layout.json is replaced by a real file.
-#[cfg(unix)]
-fn write_no_follow(path: &Path, contents: &str) -> std::io::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-
-    if let Ok(meta) = fs::symlink_metadata(path) {
-        if meta.file_type().is_symlink() {
-            fs::remove_file(path)?;
-        }
-    }
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)?;
-    file.write_all(contents.as_bytes())
-}
-
 #[cfg(not(unix))]
-fn write_no_follow(path: &Path, contents: &str) -> std::io::Result<()> {
-    if let Ok(meta) = fs::symlink_metadata(path) {
+fn write_in_dir(dir: &Path, name: &str, contents: &str) -> Result<(), ProjectError> {
+    let file = dir.join(name);
+    if let Ok(meta) = fs::symlink_metadata(&file) {
         if meta.file_type().is_symlink() {
-            fs::remove_file(path)?;
+            fs::remove_file(&file).map_err(|error| ProjectError::Io(error.to_string()))?;
         }
     }
-    fs::write(path, contents)
+    fs::write(&file, contents).map_err(|error| ProjectError::Io(error.to_string()))
 }
 
 #[cfg(all(test, unix))]
@@ -307,6 +390,20 @@ mod tests {
         let layout = repo.join(".cortex").join("layout.json");
         assert!(!fs::symlink_metadata(&layout).unwrap().file_type().is_symlink());
         assert_eq!(fs::read_to_string(&layout).unwrap(), "{\"type\":\"pane\"}");
+    }
+
+    #[test]
+    fn write_in_dir_refuses_a_symlinked_directory() {
+        let tmp = TempDir::new(line!());
+        let real = tmp.0.join("real");
+        fs::create_dir_all(&real).unwrap();
+        let link = tmp.0.join("link");
+        // Even past resolve_cortex_dir, opening the dir with O_NOFOLLOW|O_DIRECTORY
+        // rejects a directory that was swapped for a symlink.
+        symlink(&real, &link).unwrap();
+
+        assert!(write_in_dir(&link, "layout.json", "{}").is_err());
+        assert!(!real.join("layout.json").exists());
     }
 
     #[test]
