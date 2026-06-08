@@ -251,10 +251,20 @@ fn read_layout_at(path: &Path, root: &str) -> Option<String> {
     serde_json::to_string(map.get(&canonical)?).ok()
 }
 
+/// Serializes the read-modify-write of the shared store. Saves are fired
+/// without awaiting from the UI, so two overlapping writes could otherwise both
+/// load the same map and the later rename would drop the earlier insert. The
+/// atomic rename prevents a torn file; this prevents a lost update.
+static STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn write_layout_at(path: &Path, root: &str, contents: &str) -> Result<(), ProjectError> {
     let canonical = canonical_root(root)?;
     let layout: serde_json::Value = serde_json::from_str(contents)
         .map_err(|error| ProjectError::Io(format!("invalid layout JSON: {error}")))?;
+    // Hold the lock across load → modify → atomic write so concurrent saves
+    // serialize instead of clobbering each other with stale maps. Recover from a
+    // poisoned lock (a prior panic) rather than failing every future save.
+    let _guard = STORE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     // Fail rather than overwrite a store we could not parse, so one project's
     // save never erases the others.
     let mut map = load_layouts(path)?;
@@ -399,6 +409,36 @@ mod tests {
         fs::create_dir_all(&repo).unwrap();
 
         assert_eq!(read_layout_at(&store, repo.to_str().unwrap()), None);
+    }
+
+    #[test]
+    fn concurrent_writes_do_not_lose_updates() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let tmp = TempDir::new(line!());
+        let store = Arc::new(tmp.0.join("layouts.json"));
+        let repo_a = tmp.0.join("repo-a");
+        let repo_b = tmp.0.join("repo-b");
+        fs::create_dir_all(&repo_a).unwrap();
+        fs::create_dir_all(&repo_b).unwrap();
+
+        let handles: Vec<_> = (0..24)
+            .map(|i| {
+                let store = Arc::clone(&store);
+                let repo = if i % 2 == 0 { repo_a.clone() } else { repo_b.clone() };
+                thread::spawn(move || {
+                    write_layout_at(&store, repo.to_str().unwrap(), "{\"type\":\"pane\"}").unwrap();
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Interleaved saves serialize, so neither repository's entry is lost.
+        assert!(read_layout_at(&store, repo_a.to_str().unwrap()).is_some());
+        assert!(read_layout_at(&store, repo_b.to_str().unwrap()).is_some());
     }
 
     #[test]
