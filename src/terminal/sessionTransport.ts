@@ -40,6 +40,10 @@ export async function startLocalTerminal(
     if (event.payload.sessionId === sessionId) onExit();
   });
 
+  // Start streaming only now that the listeners are attached, so the backend
+  // never emits startup output (or a fast exit) before we can receive it.
+  await invoke('subscribe_terminal', { sessionId });
+
   return {
     sessionId,
     write(data) {

@@ -19,6 +19,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             settings::get_terminal_settings,
             terminal::start_terminal,
+            terminal::subscribe_terminal,
             terminal::write_terminal,
             terminal::resize_terminal,
             terminal::stop_terminal,

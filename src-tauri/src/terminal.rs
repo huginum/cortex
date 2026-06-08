@@ -23,6 +23,10 @@ struct TerminalSession {
     master: Box<dyn MasterPty + Send>,
     writer: Mutex<Box<dyn Write + Send>>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
+    /// The PTY reader, held until the frontend subscribes. Output streaming does
+    /// not begin until then, so no startup output is emitted before listeners
+    /// are attached. `None` once streaming has started.
+    reader: Mutex<Option<Box<dyn Read + Send>>>,
 }
 
 #[derive(Serialize, Clone)]
@@ -59,7 +63,6 @@ impl serde::Serialize for TerminalError {
 
 #[tauri::command]
 pub fn start_terminal(
-    app: AppHandle,
     manager: State<'_, TerminalManager>,
     cols: u16,
     rows: u16,
@@ -93,7 +96,7 @@ pub fn start_terminal(
         .slave
         .spawn_command(command)
         .map_err(|error| TerminalError::Pty(error.to_string()))?;
-    let mut reader = pair
+    let reader = pair
         .master
         .try_clone_reader()
         .map_err(|error| TerminalError::Pty(error.to_string()))?;
@@ -106,16 +109,60 @@ pub fn start_terminal(
         "local-{}",
         manager.next_id.fetch_add(1, Ordering::Relaxed) + 1
     );
-    let output_session_id = session_id.clone();
-    let output_app = app.clone();
 
+    // The reader is parked on the session and only drained once the frontend
+    // calls `subscribe_terminal`, after it has attached its listeners — so the
+    // initial prompt (or a fast exit) is never emitted before anyone is
+    // listening, and the PTY buffers it in the meantime.
+    let session = TerminalSession {
+        master: pair.master,
+        writer: Mutex::new(writer),
+        child: Mutex::new(child),
+        reader: Mutex::new(Some(reader)),
+    };
+
+    manager
+        .sessions
+        .lock()
+        .map_err(|_| TerminalError::Lock)?
+        .insert(session_id.clone(), session);
+
+    Ok(session_id)
+}
+
+/// Begin streaming a session's output. The frontend calls this only after it has
+/// registered its `terminal-output`/`terminal-exit` listeners, closing the race
+/// where startup output is emitted before the listeners exist. Taking the reader
+/// makes it a no-op if called more than once.
+#[tauri::command]
+pub fn subscribe_terminal(
+    app: AppHandle,
+    manager: State<'_, TerminalManager>,
+    session_id: String,
+) -> Result<(), TerminalError> {
+    let reader = {
+        let sessions = manager.sessions.lock().map_err(|_| TerminalError::Lock)?;
+        let session = sessions
+            .get(&session_id)
+            .ok_or_else(|| TerminalError::MissingSession(session_id.clone()))?;
+        session
+            .reader
+            .lock()
+            .map_err(|_| TerminalError::Lock)?
+            .take()
+    };
+    let Some(mut reader) = reader else {
+        return Ok(());
+    };
+
+    let output_session_id = session_id;
     thread::spawn(move || {
         let mut buffer = [0_u8; 8192];
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(read) => {
-                    let _ = output_app.emit(
+                    let _ = app.emit(
                         "terminal-output",
                         TerminalOutput {
                             session_id: output_session_id.clone(),
@@ -127,7 +174,7 @@ pub fn start_terminal(
             }
         }
 
-        let _ = output_app.emit(
+        let _ = app.emit(
             "terminal-exit",
             TerminalExit {
                 session_id: output_session_id,
@@ -135,19 +182,7 @@ pub fn start_terminal(
         );
     });
 
-    let session = TerminalSession {
-        master: pair.master,
-        writer: Mutex::new(writer),
-        child: Mutex::new(child),
-    };
-
-    manager
-        .sessions
-        .lock()
-        .map_err(|_| TerminalError::Lock)?
-        .insert(session_id.clone(), session);
-
-    Ok(session_id)
+    Ok(())
 }
 
 /// Pick a working directory for a new shell, confined to the project repository.

@@ -231,16 +231,23 @@ fn canonical_root(root: &str) -> Result<String, ProjectError> {
         .ok_or_else(|| ProjectError::Io("repository path is not valid UTF-8".into()))
 }
 
-fn read_layouts(path: &Path) -> LayoutMap {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|data| serde_json::from_str(&data).ok())
-        .unwrap_or_default()
+/// Load the layout map. A missing file is an empty map; a present-but-unparseable
+/// file is an error rather than an empty map, so a corrupt or truncated store is
+/// never silently treated as empty and overwritten — which, now that all
+/// projects share one file, would drop every other project's saved layout.
+fn load_layouts(path: &Path) -> Result<LayoutMap, ProjectError> {
+    match fs::read_to_string(path) {
+        Ok(data) => serde_json::from_str(&data)
+            .map_err(|error| ProjectError::Io(format!("layout store is corrupt: {error}"))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(LayoutMap::new()),
+        Err(error) => Err(ProjectError::Io(error.to_string())),
+    }
 }
 
 fn read_layout_at(path: &Path, root: &str) -> Option<String> {
     let canonical = canonical_root(root).ok()?;
-    let map = read_layouts(path);
+    // A corrupt store reads as "no layout" (open empty) — non-destructive.
+    let map = load_layouts(path).ok()?;
     serde_json::to_string(map.get(&canonical)?).ok()
 }
 
@@ -248,7 +255,9 @@ fn write_layout_at(path: &Path, root: &str, contents: &str) -> Result<(), Projec
     let canonical = canonical_root(root)?;
     let layout: serde_json::Value = serde_json::from_str(contents)
         .map_err(|error| ProjectError::Io(format!("invalid layout JSON: {error}")))?;
-    let mut map = read_layouts(path);
+    // Fail rather than overwrite a store we could not parse, so one project's
+    // save never erases the others.
+    let mut map = load_layouts(path)?;
     map.insert(canonical, layout);
     let data =
         serde_json::to_string_pretty(&map).map_err(|error| ProjectError::Io(error.to_string()))?;
@@ -350,5 +359,20 @@ mod tests {
         fs::create_dir_all(&repo).unwrap();
 
         assert_eq!(read_layout_at(&store, repo.to_str().unwrap()), None);
+    }
+
+    #[test]
+    fn write_does_not_clobber_a_corrupt_store() {
+        let tmp = TempDir::new(line!());
+        let store = tmp.0.join("layouts.json");
+        fs::write(&store, "{ not valid json").unwrap();
+        let repo = tmp.0.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+
+        // A save against a corrupt store fails instead of overwriting it with a
+        // single-entry map (which would drop every other project's layout).
+        let result = write_layout_at(&store, repo.to_str().unwrap(), "{\"type\":\"pane\"}");
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(&store).unwrap(), "{ not valid json");
     }
 }
