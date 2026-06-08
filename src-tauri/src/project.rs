@@ -261,7 +261,47 @@ fn write_layout_at(path: &Path, root: &str, contents: &str) -> Result<(), Projec
     map.insert(canonical, layout);
     let data =
         serde_json::to_string_pretty(&map).map_err(|error| ProjectError::Io(error.to_string()))?;
-    fs::write(path, data).map_err(|error| ProjectError::Io(error.to_string()))
+    write_atomic(path, data.as_bytes())
+}
+
+/// Write `data` to `path` atomically: write a fresh temp file in the same
+/// directory, flush it to disk, then rename it into place. An interrupted save
+/// (crash, power loss, partial write) leaves either the old file or the new one
+/// intact — never a truncated store that `load_layouts` would reject and that
+/// would make every project's layout unavailable.
+fn write_atomic(path: &Path, data: &[u8]) -> Result<(), ProjectError> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    let dir = path
+        .parent()
+        .ok_or_else(|| ProjectError::Io("layout store has no parent directory".into()))?;
+    let stem = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("layouts.json");
+    let tmp = dir.join(format!(
+        ".{stem}.{}.{}.tmp",
+        std::process::id(),
+        TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+
+    let write_result = (|| {
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(data)?;
+        file.sync_all()
+    })();
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&tmp);
+        return Err(ProjectError::Io(error.to_string()));
+    }
+
+    fs::rename(&tmp, path).map_err(|error| {
+        let _ = fs::remove_file(&tmp);
+        ProjectError::Io(error.to_string())
+    })
 }
 
 #[cfg(test)]
@@ -359,6 +399,24 @@ mod tests {
         fs::create_dir_all(&repo).unwrap();
 
         assert_eq!(read_layout_at(&store, repo.to_str().unwrap()), None);
+    }
+
+    #[test]
+    fn write_leaves_no_temp_file_behind() {
+        let tmp = TempDir::new(line!());
+        let store = tmp.0.join("layouts.json");
+        let repo = tmp.0.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+
+        write_layout_at(&store, repo.to_str().unwrap(), "{\"type\":\"pane\"}").unwrap();
+
+        // Exactly the store remains — the atomic temp file was renamed away.
+        let entries: Vec<_> = fs::read_dir(&tmp.0)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("layouts") || name.contains(".tmp"))
+            .collect();
+        assert_eq!(entries, vec!["layouts.json".to_string()]);
     }
 
     #[test]
