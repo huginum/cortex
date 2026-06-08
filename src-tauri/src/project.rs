@@ -187,201 +187,92 @@ pub fn clone_project(
     open_project(app, dest)
 }
 
-/// Resolve `<root>/.cortex`, guaranteeing it is a real directory inside the repo
-/// rather than a symlink. `.cortex` is repo-controlled, so a malicious repo could
-/// ship it as a symlink to another directory to redirect our writes outside the
-/// project; refuse to follow it. Creates the directory when `create` is set.
-fn resolve_cortex_dir(root: &Path, create: bool) -> Result<PathBuf, ProjectError> {
-    let dir = root.join(".cortex");
-    match fs::symlink_metadata(&dir) {
-        Ok(meta) if meta.file_type().is_symlink() => Err(ProjectError::Io(
-            ".cortex is a symlink; refusing to follow it".into(),
-        )),
-        Ok(meta) if meta.is_dir() => Ok(dir),
-        Ok(_) => Err(ProjectError::Io(
-            ".cortex exists but is not a directory".into(),
-        )),
-        Err(_) if create => {
-            fs::create_dir(&dir).map_err(|error| ProjectError::Io(error.to_string()))?;
-            Ok(dir)
-        }
-        Err(error) => Err(ProjectError::Io(error.to_string())),
-    }
+/// A persisted layout, stored in Cortex's own config directory rather than in
+/// the repository. The canonical repository root is recorded alongside the
+/// layout so a hash-filename collision (or a stale entry) is detected on read
+/// and treated as a miss.
+#[derive(Serialize, Deserialize)]
+struct StoredLayout {
+    root: String,
+    layout: serde_json::Value,
 }
-
-const LAYOUT_FILE: &str = "layout.json";
 
 /// Read a project's saved layout, if any. Returns the raw JSON document so the
-/// frontend owns its shape. `.cortex` and `layout.json` are repo-controlled, so
-/// neither a symlinked directory nor a symlinked file is followed (which could
-/// otherwise read an arbitrary file's contents into the app).
+/// frontend owns its shape. Layout lives in the application config directory,
+/// keyed by the canonical repository root, so nothing inside the repository is
+/// read.
 #[tauri::command]
-pub fn read_layout(root: String) -> Option<String> {
-    let dir = resolve_cortex_dir(Path::new(&root), false).ok()?;
-    read_in_dir(&dir, LAYOUT_FILE)
+pub fn read_layout(app: AppHandle, root: String) -> Option<String> {
+    read_layout_in(&layouts_dir(&app).ok()?, &root)
 }
 
-/// Persist a project's layout under `<root>/.cortex/layout.json`.
+/// Persist a project's layout in the application config directory, keyed by the
+/// canonical repository root. Cortex never writes inside the repository.
 #[tauri::command]
-pub fn write_layout(root: String, contents: String) -> Result<(), ProjectError> {
-    let dir = resolve_cortex_dir(Path::new(&root), true)?;
-    write_in_dir(&dir, LAYOUT_FILE, &contents)
+pub fn write_layout(app: AppHandle, root: String, contents: String) -> Result<(), ProjectError> {
+    write_layout_in(&layouts_dir(&app)?, &root, &contents)
 }
 
-/// Read `name` inside `dir` without following a symlink at either the directory
-/// or the file. On Unix the directory is opened with `O_NOFOLLOW | O_DIRECTORY`
-/// and the file is opened relative to that pinned fd, so swapping `.cortex` for
-/// a symlink after it was validated cannot redirect the read outside the repo.
-/// The file is opened `O_NONBLOCK` and required to be a regular file, so a FIFO
-/// or device planted at `layout.json` cannot block or hang project open.
-#[cfg(unix)]
-fn read_in_dir(dir: &Path, name: &str) -> Option<String> {
-    use std::io::Read;
-    use std::os::unix::io::FromRawFd;
+/// The `layouts/` directory under the app config dir, created if absent.
+fn layouts_dir(app: &AppHandle) -> Result<PathBuf, ProjectError> {
+    let dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| ProjectError::Io(error.to_string()))?
+        .join("layouts");
+    fs::create_dir_all(&dir).map_err(|error| ProjectError::Io(error.to_string()))?;
+    Ok(dir)
+}
 
-    let dirfd = open_dir_nofollow(dir).ok()?;
-    let name_c = std::ffi::CString::new(name).ok()?;
-    // O_NONBLOCK so opening a FIFO returns immediately instead of waiting for a
-    // writer; it has no effect on the subsequent reads of a regular file.
-    let fd = unsafe {
-        libc::openat(
-            dirfd.0,
-            name_c.as_ptr(),
-            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
-        )
-    };
-    if fd < 0 {
+/// Canonicalize a repository root to a stable string key (resolves symlinks and
+/// `.`/`..`), so the same repository maps to the same layout regardless of how
+/// its path was spelled.
+fn canonical_root(root: &str) -> Result<String, ProjectError> {
+    Path::new(root)
+        .canonicalize()
+        .map_err(|error| ProjectError::Io(error.to_string()))?
+        .to_str()
+        .map(|value| value.to_string())
+        .ok_or_else(|| ProjectError::Io("repository path is not valid UTF-8".into()))
+}
+
+/// The layout file for a project: `<dir>/<hash-of-canonical-root>.json`. The
+/// hash only needs to produce a stable, filesystem-safe name; the canonical
+/// root stored inside the file resolves any collision deterministically.
+fn layout_file(dir: &Path, canonical: &str) -> PathBuf {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    canonical.hash(&mut hasher);
+    dir.join(format!("{:016x}.json", hasher.finish()))
+}
+
+fn read_layout_in(dir: &Path, root: &str) -> Option<String> {
+    let canonical = canonical_root(root).ok()?;
+    let data = fs::read_to_string(layout_file(dir, &canonical)).ok()?;
+    let stored: StoredLayout = serde_json::from_str(&data).ok()?;
+    // Guard against a hash collision or a stale/foreign entry.
+    if stored.root != canonical {
         return None;
     }
-    let mut file = unsafe { fs::File::from_raw_fd(fd) };
-    // Only a regular file is a real layout; reject FIFOs, devices, directories.
-    if !file.metadata().ok()?.file_type().is_file() {
-        return None;
-    }
-    let mut buf = String::new();
-    file.read_to_string(&mut buf).ok()?;
-    Some(buf)
+    serde_json::to_string(&stored.layout).ok()
 }
 
-/// Write `contents` to `name` inside `dir` without following a symlink at the
-/// directory or the file, and without ever truncating a pre-existing entry in
-/// place. On Unix the parent directory is opened with `O_NOFOLLOW | O_DIRECTORY`
-/// and all operations go through that pinned fd via `*at` syscalls, so a racing
-/// swap of `.cortex` for a symlink cannot redirect the write. The data is
-/// written to a fresh temp file and `renameat`-ed over `name`: rename repoints
-/// the directory entry atomically, so even if `name` was a hard link to a file
-/// outside the repo, that target's inode is left untouched (and a symlink dest
-/// is replaced, not followed).
-#[cfg(unix)]
-fn write_in_dir(dir: &Path, name: &str, contents: &str) -> Result<(), ProjectError> {
-    use std::io::Write;
-    use std::os::unix::io::FromRawFd;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
-
-    let dirfd = open_dir_nofollow(dir)?;
-    let name_c =
-        std::ffi::CString::new(name).map_err(|_| ProjectError::Io("name contains NUL".into()))?;
-    let tmp = format!(
-        ".{name}.{}.{}.tmp",
-        std::process::id(),
-        TMP_SEQ.fetch_add(1, Ordering::Relaxed)
-    );
-    let tmp_c =
-        std::ffi::CString::new(tmp).map_err(|_| ProjectError::Io("temp name contains NUL".into()))?;
-
-    // Clear any stale/planted entry at the temp name (the entry itself, not a
-    // target it may point at), then create a brand-new regular file: O_EXCL plus
-    // O_NOFOLLOW guarantees we never reuse or follow an existing inode.
-    unsafe { libc::unlinkat(dirfd.0, tmp_c.as_ptr(), 0) };
-    let fd = unsafe {
-        libc::openat(
-            dirfd.0,
-            tmp_c.as_ptr(),
-            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            0o644,
-        )
+fn write_layout_in(dir: &Path, root: &str, contents: &str) -> Result<(), ProjectError> {
+    let canonical = canonical_root(root)?;
+    let layout: serde_json::Value = serde_json::from_str(contents)
+        .map_err(|error| ProjectError::Io(format!("invalid layout JSON: {error}")))?;
+    let stored = StoredLayout {
+        root: canonical.clone(),
+        layout,
     };
-    if fd < 0 {
-        return Err(ProjectError::Io(
-            std::io::Error::last_os_error().to_string(),
-        ));
-    }
-    let mut file = unsafe { fs::File::from_raw_fd(fd) };
-    if let Err(error) = file.write_all(contents.as_bytes()) {
-        unsafe { libc::unlinkat(dirfd.0, tmp_c.as_ptr(), 0) };
-        return Err(ProjectError::Io(error.to_string()));
-    }
-    drop(file);
-
-    let renamed = unsafe { libc::renameat(dirfd.0, tmp_c.as_ptr(), dirfd.0, name_c.as_ptr()) };
-    if renamed != 0 {
-        let error = std::io::Error::last_os_error();
-        unsafe { libc::unlinkat(dirfd.0, tmp_c.as_ptr(), 0) };
-        return Err(ProjectError::Io(error.to_string()));
-    }
-    Ok(())
+    let data =
+        serde_json::to_string_pretty(&stored).map_err(|error| ProjectError::Io(error.to_string()))?;
+    fs::write(layout_file(dir, &canonical), data).map_err(|error| ProjectError::Io(error.to_string()))
 }
 
-/// An owned directory file descriptor, closed on drop.
-#[cfg(unix)]
-struct DirFd(i32);
-
-#[cfg(unix)]
-impl Drop for DirFd {
-    fn drop(&mut self) {
-        unsafe { libc::close(self.0) };
-    }
-}
-
-/// Open `dir` itself as a directory fd without following a symlink. Pinning the
-/// directory inode means later `*at` operations cannot be redirected by swapping
-/// the directory for a symlink after this point.
-#[cfg(unix)]
-fn open_dir_nofollow(dir: &Path) -> Result<DirFd, ProjectError> {
-    use std::os::unix::ffi::OsStrExt;
-    let dir_c = std::ffi::CString::new(dir.as_os_str().as_bytes())
-        .map_err(|_| ProjectError::Io("path contains NUL".into()))?;
-    let fd = unsafe {
-        libc::open(
-            dir_c.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    if fd < 0 {
-        return Err(ProjectError::Io(
-            std::io::Error::last_os_error().to_string(),
-        ));
-    }
-    Ok(DirFd(fd))
-}
-
-#[cfg(not(unix))]
-fn read_in_dir(dir: &Path, name: &str) -> Option<String> {
-    let file = dir.join(name);
-    let meta = fs::symlink_metadata(&file).ok()?;
-    if meta.file_type().is_symlink() || !meta.is_file() {
-        return None;
-    }
-    fs::read_to_string(&file).ok()
-}
-
-#[cfg(not(unix))]
-fn write_in_dir(dir: &Path, name: &str, contents: &str) -> Result<(), ProjectError> {
-    let file = dir.join(name);
-    if let Ok(meta) = fs::symlink_metadata(&file) {
-        if meta.file_type().is_symlink() {
-            fs::remove_file(&file).map_err(|error| ProjectError::Io(error.to_string()))?;
-        }
-    }
-    fs::write(&file, contents).map_err(|error| ProjectError::Io(error.to_string()))
-}
-
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::symlink;
 
     /// A scratch directory under the system temp dir, removed on drop.
     struct TempDir(PathBuf);
@@ -402,112 +293,81 @@ mod tests {
     }
 
     #[test]
-    fn write_layout_does_not_clobber_a_symlinked_target() {
+    fn layout_round_trips_through_local_storage() {
         let tmp = TempDir::new(line!());
-        let repo = tmp.0.join("repo");
-        fs::create_dir_all(repo.join(".cortex")).unwrap();
-        let victim = tmp.0.join("victim.txt");
-        fs::write(&victim, "SECRET-ORIGINAL").unwrap();
-        // Attacker plants layout.json as a symlink to a file outside the repo.
-        symlink(&victim, repo.join(".cortex").join("layout.json")).unwrap();
-
-        write_layout(repo.to_str().unwrap().into(), "{\"type\":\"pane\"}".into()).unwrap();
-
-        // The victim is untouched and the layout is now a real file in the repo.
-        assert_eq!(fs::read_to_string(&victim).unwrap(), "SECRET-ORIGINAL");
-        let layout = repo.join(".cortex").join("layout.json");
-        assert!(!fs::symlink_metadata(&layout).unwrap().file_type().is_symlink());
-        assert_eq!(fs::read_to_string(&layout).unwrap(), "{\"type\":\"pane\"}");
-    }
-
-    #[test]
-    fn write_layout_does_not_truncate_a_hard_linked_target() {
-        let tmp = TempDir::new(line!());
-        let repo = tmp.0.join("repo");
-        fs::create_dir_all(repo.join(".cortex")).unwrap();
-        let victim = tmp.0.join("victim.txt");
-        fs::write(&victim, "SECRET-ORIGINAL").unwrap();
-        // Attacker hard-links layout.json to a file outside the repo (same fs).
-        fs::hard_link(&victim, repo.join(".cortex").join("layout.json")).unwrap();
-
-        write_layout(repo.to_str().unwrap().into(), "{\"type\":\"pane\"}".into()).unwrap();
-
-        // The hard-linked target keeps its contents; the rename repointed only
-        // the directory entry, and layout.json is now an independent file.
-        assert_eq!(fs::read_to_string(&victim).unwrap(), "SECRET-ORIGINAL");
-        let layout = repo.join(".cortex").join("layout.json");
-        assert_eq!(fs::read_to_string(&layout).unwrap(), "{\"type\":\"pane\"}");
-    }
-
-    #[test]
-    fn read_layout_ignores_a_fifo_without_hanging() {
-        use std::os::unix::ffi::OsStrExt;
-        let tmp = TempDir::new(line!());
-        let repo = tmp.0.join("repo");
-        fs::create_dir_all(repo.join(".cortex")).unwrap();
-        // A FIFO at layout.json would block a plain blocking open until a writer
-        // appears; read_layout must return None instead.
-        let fifo = repo.join(".cortex").join("layout.json");
-        let fifo_c = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
-        assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o644) }, 0);
-
-        assert_eq!(read_layout(repo.to_str().unwrap().into()), None);
-    }
-
-    #[test]
-    fn write_in_dir_refuses_a_symlinked_directory() {
-        let tmp = TempDir::new(line!());
-        let real = tmp.0.join("real");
-        fs::create_dir_all(&real).unwrap();
-        let link = tmp.0.join("link");
-        // Even past resolve_cortex_dir, opening the dir with O_NOFOLLOW|O_DIRECTORY
-        // rejects a directory that was swapped for a symlink.
-        symlink(&real, &link).unwrap();
-
-        assert!(write_in_dir(&link, "layout.json", "{}").is_err());
-        assert!(!real.join("layout.json").exists());
-    }
-
-    #[test]
-    fn write_layout_refuses_a_symlinked_cortex_dir() {
-        let tmp = TempDir::new(line!());
-        let repo = tmp.0.join("repo");
-        fs::create_dir_all(&repo).unwrap();
-        let elsewhere = tmp.0.join("elsewhere");
-        fs::create_dir_all(&elsewhere).unwrap();
-        // Attacker points .cortex at a directory outside the repo.
-        symlink(&elsewhere, repo.join(".cortex")).unwrap();
-
-        let result = write_layout(repo.to_str().unwrap().into(), "{}".into());
-
-        assert!(result.is_err());
-        assert!(!elsewhere.join("layout.json").exists());
-    }
-
-    #[test]
-    fn read_layout_ignores_a_symlinked_file() {
-        let tmp = TempDir::new(line!());
-        let repo = tmp.0.join("repo");
-        fs::create_dir_all(repo.join(".cortex")).unwrap();
-        let secret = tmp.0.join("secret.txt");
-        fs::write(&secret, "TOP SECRET").unwrap();
-        symlink(&secret, repo.join(".cortex").join("layout.json")).unwrap();
-
-        assert_eq!(read_layout(repo.to_str().unwrap().into()), None);
-    }
-
-    #[test]
-    fn layout_round_trips_through_a_real_file() {
-        let tmp = TempDir::new(line!());
+        let store = tmp.0.join("layouts");
+        fs::create_dir_all(&store).unwrap();
         let repo = tmp.0.join("repo");
         fs::create_dir_all(&repo).unwrap();
 
-        write_layout(repo.to_str().unwrap().into(), "{\"type\":\"pane\",\"cwd\":\".\"}".into())
-            .unwrap();
+        write_layout_in(&store, repo.to_str().unwrap(), "{\"type\":\"pane\",\"cwd\":\".\"}").unwrap();
 
-        assert_eq!(
-            read_layout(repo.to_str().unwrap().into()),
-            Some("{\"type\":\"pane\",\"cwd\":\".\"}".into())
-        );
+        let restored = read_layout_in(&store, repo.to_str().unwrap()).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&restored).unwrap();
+        assert_eq!(value["type"], "pane");
+        assert_eq!(value["cwd"], ".");
+    }
+
+    #[test]
+    fn layout_is_not_written_inside_the_repository() {
+        let tmp = TempDir::new(line!());
+        let store = tmp.0.join("layouts");
+        fs::create_dir_all(&store).unwrap();
+        let repo = tmp.0.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+
+        write_layout_in(&store, repo.to_str().unwrap(), "{\"type\":\"pane\"}").unwrap();
+
+        // The layout lives under the store, never in the repo.
+        assert!(!repo.join(".cortex").exists());
+        assert!(fs::read_dir(&store).unwrap().next().is_some());
+    }
+
+    #[test]
+    fn layout_is_scoped_to_its_repository() {
+        let tmp = TempDir::new(line!());
+        let store = tmp.0.join("layouts");
+        fs::create_dir_all(&store).unwrap();
+        let repo_a = tmp.0.join("repo-a");
+        let repo_b = tmp.0.join("repo-b");
+        fs::create_dir_all(&repo_a).unwrap();
+        fs::create_dir_all(&repo_b).unwrap();
+
+        write_layout_in(&store, repo_a.to_str().unwrap(), "{\"type\":\"pane\"}").unwrap();
+
+        // A different repository has no layout of its own.
+        assert_eq!(read_layout_in(&store, repo_b.to_str().unwrap()), None);
+    }
+
+    #[test]
+    fn missing_layout_reads_as_none() {
+        let tmp = TempDir::new(line!());
+        let store = tmp.0.join("layouts");
+        fs::create_dir_all(&store).unwrap();
+        let repo = tmp.0.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+
+        assert_eq!(read_layout_in(&store, repo.to_str().unwrap()), None);
+    }
+
+    #[test]
+    fn root_mismatch_in_file_reads_as_none() {
+        let tmp = TempDir::new(line!());
+        let store = tmp.0.join("layouts");
+        fs::create_dir_all(&store).unwrap();
+        let repo = tmp.0.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+
+        // Simulate a hash collision: a file at the repo's key whose stored root
+        // belongs to a different project must be treated as a miss.
+        let canonical = canonical_root(repo.to_str().unwrap()).unwrap();
+        let data = serde_json::to_string(&StoredLayout {
+            root: "/some/other/repo".into(),
+            layout: serde_json::json!({"type": "pane"}),
+        })
+        .unwrap();
+        fs::write(layout_file(&store, &canonical), data).unwrap();
+
+        assert_eq!(read_layout_in(&store, repo.to_str().unwrap()), None);
     }
 }

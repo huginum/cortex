@@ -8,9 +8,9 @@ High-level responsibilities:
 * libghostty-vt WebAssembly owns terminal emulation state and plain render extraction.
 * Tauri/Rust owns local PTY session lifecycle, byte transport, resize requests, terminal setting discovery, git project operations, and project persistence.
 
-The app launches into a project picker rather than a terminal. A project is a git repository; opening one restores its saved pane layout (`<repo>/.cortex/layout.json`) and starts a fresh shell in each pane's working directory. `start_terminal` takes a working directory, and a pane's shell exiting closes that pane rather than the app.
+The app launches into a project picker rather than a terminal. A project is a git repository; opening one restores its saved pane layout and starts a fresh shell in each pane's working directory. `start_terminal` takes a working directory, and a pane's shell exiting closes that pane rather than the app.
 
-Each pane is a `TerminalPane` (the renderer, input, selection, and resize logic). `ProjectView` arranges panes as a binary split tree and tracks the focused pane so input follows focus. The recent-projects list lives in app config; per-project layout lives in the repository under `.cortex/`. Cortex does not modify the repository's git configuration, so `.cortex/` is the user's to ignore or commit.
+Each pane is a `TerminalPane` (the renderer, input, selection, and resize logic). `ProjectView` arranges panes as a binary split tree and tracks the focused pane so input follows focus. Both the recent-projects list and the per-project layout live in the application config directory (the layout keyed by the canonical repository root path); Cortex never reads or writes inside the repository working tree, so opening a project adds nothing to `git status`.
 
 The terminal code is split so future session backends can attach to nerdbox containers without replacing the frontend terminal renderer.
 

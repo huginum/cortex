@@ -54,16 +54,24 @@ The system SHALL persist the recent-projects list in application configuration, 
 - **WHEN** a user opens projects and later relaunches Cortex
 - **THEN** the previously opened projects appear in the picker in most-recently-opened order
 
-### Requirement: Project layout persists inside the repository
-The system SHALL persist a project's terminal layout — the split-pane tree and each pane's working directory relative to the repository root — in a `.cortex/` directory at the repository root. The system SHALL NOT modify the repository's git configuration, including tracked ignore files and the local exclude file (`.git/info/exclude`); whether `.cortex/` is ignored, committed, or left untracked is left to the user.
+### Requirement: Project layout persists in local application storage
+The system SHALL persist a project's terminal layout — the split-pane tree and each pane's working directory relative to the repository root — in the application configuration directory, keyed by the project's canonical repository root path. The system SHALL NOT create, read, or modify any path inside the repository working tree for layout storage.
 
 #### Scenario: Layout saved on change
 - **WHEN** a project's pane layout changes (a pane is added, removed, split, or its working directory changes)
-- **THEN** the system writes the updated layout to `<repository root>/.cortex/layout.json`
+- **THEN** the system writes the updated layout to a file in the application configuration directory keyed by the project's canonical repository root path
 
-#### Scenario: Git ignore configuration left untouched
-- **WHEN** a project is opened, initialized, or cloned
-- **THEN** the system does not modify the repository's tracked ignore files or its `.git/info/exclude`
+#### Scenario: Repository is never written for layout storage
+- **WHEN** a project's layout is saved or loaded
+- **THEN** the system does not create, read, or modify any file inside the repository working tree
+
+#### Scenario: Layout is scoped to its repository
+- **WHEN** a project is opened
+- **THEN** the system loads only the layout previously saved for that project's canonical repository root path, and opens the project empty when no layout was saved for it
+
+#### Scenario: Final change persists when closing within the debounce window
+- **WHEN** a layout change occurs and the project or window is closed before the save debounce interval elapses
+- **THEN** the system still writes the final layout before tearing down
 
 ### Requirement: Reopening a project restores its layout with fresh shells
 When a project with a saved layout is reopened, the system SHALL restore the split-pane arrangement and start a fresh shell in each pane's saved working directory. The system SHALL NOT attempt to restore live process state or prior scrollback.

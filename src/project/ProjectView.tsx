@@ -32,6 +32,11 @@ export function ProjectView({ project, initialLayout, onClose }: ProjectViewProp
   const skipNextSave = useRef(true);
   const rootRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<Drag | null>(null);
+  // Latest layout and whether a debounced save is still pending, so the final
+  // change can be flushed if the project/window closes within the debounce.
+  const layoutRef = useRef(layout);
+  const savePendingRef = useRef(false);
+  layoutRef.current = layout;
 
   // Persist the layout whenever it changes (but not the initial restored value).
   // Debounced so a divider drag coalesces into a single write rather than one
@@ -41,9 +46,24 @@ export function ProjectView({ project, initialLayout, onClose }: ProjectViewProp
       skipNextSave.current = false;
       return;
     }
-    const timer = window.setTimeout(() => void saveLayout(project.root, layout), 300);
+    savePendingRef.current = true;
+    const timer = window.setTimeout(() => {
+      savePendingRef.current = false;
+      void saveLayout(project.root, layout);
+    }, 300);
     return () => window.clearTimeout(timer);
   }, [layout, project.root]);
+
+  // Flush a still-pending save on unmount (e.g. closing the project or window
+  // within the 300 ms debounce window) so the last change is not lost.
+  useEffect(() => {
+    return () => {
+      if (savePendingRef.current) {
+        savePendingRef.current = false;
+        void saveLayout(project.root, layoutRef.current);
+      }
+    };
+  }, [project.root]);
 
   // Keep focus on a live pane: when the focused pane disappears (closed), move
   // focus to the first remaining pane.

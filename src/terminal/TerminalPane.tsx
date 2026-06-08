@@ -57,6 +57,13 @@ export function TerminalPane({ cwd, root, onExit, focused, onFocus }: TerminalPa
   // at launch; panes only exist once a project is open and a terminal is added
   // or restored, so starting here is always an explicit, user-driven action.
   useEffect(() => {
+    // Re-arm cancellation on every setup. Under React StrictMode (dev) the
+    // effects run mount → unmount → remount synchronously; the unmount sets
+    // cancelledRef, and without this re-arm the in-flight start() would bail
+    // after its awaits and the pane would hang on "Starting shell …". A real
+    // unmount has no re-setup, so cancelledRef stays true and the leak guard
+    // still tears down a late-resolving session.
+    cancelledRef.current = false;
     if (startedRef.current) return;
     startedRef.current = true;
     void start();

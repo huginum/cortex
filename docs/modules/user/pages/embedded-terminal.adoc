@@ -53,15 +53,15 @@ empty.
 == Saved layout
 
 Cortex saves a project's pane layout (the split arrangement and each pane's
-directory) to `.cortex/layout.json` in the repository. Reopening the project
-restores that layout and starts fresh shells in each pane's directory. The
-layout records panes and directories only — not previous output — so reopening
-gives you clean shells in the right places.
+directory) in its own application data, on your machine — not in the
+repository. Reopening the project restores that layout and starts fresh shells
+in each pane's directory. The layout records panes and directories only — not
+previous output — so reopening gives you clean shells in the right places.
 
-Cortex does not change your git configuration, so `.cortex/layout.json` shows up
-in `git status` like any other file. It is yours to manage: ignore it (add
-`.cortex/` to `.gitignore` or `.git/info/exclude`), commit it to share a default
-workspace with anyone who clones the repository, or simply leave it untracked.
+Because the layout lives outside the repository, opening a project never adds
+anything to `git status` and never touches your files. The layout is personal
+to this machine: it is not committed and does not travel to other clones. If
+you move or rename the repository, it simply opens with a fresh, empty layout.
 
 Cortex plans to support your existing Ghostty configuration as much as
 practical, so users can bring their preferred terminal behavior forward instead
