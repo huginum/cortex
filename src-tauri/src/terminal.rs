@@ -65,6 +65,7 @@ pub fn start_terminal(
     rows: u16,
     pixel_width: u16,
     pixel_height: u16,
+    cwd: Option<String>,
 ) -> Result<String, TerminalError> {
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -83,6 +84,9 @@ pub fn start_terminal(
     command.env("COLORTERM", "truecolor");
     command.env("TERM_PROGRAM", "Cortex");
     command.env("PATH", terminal_path());
+    if let Some(dir) = resolve_cwd(cwd) {
+        command.cwd(dir);
+    }
 
     let child = pair
         .slave
@@ -143,6 +147,19 @@ pub fn start_terminal(
         .insert(session_id.clone(), session);
 
     Ok(session_id)
+}
+
+/// Pick a working directory for a new shell. Uses the requested directory when
+/// it exists, otherwise falls back to the user's home so a stale or missing
+/// saved path never prevents a session from starting.
+fn resolve_cwd(cwd: Option<String>) -> Option<std::path::PathBuf> {
+    if let Some(requested) = cwd {
+        let path = std::path::PathBuf::from(&requested);
+        if path.is_dir() {
+            return Some(path);
+        }
+    }
+    std::env::var_os("HOME").map(std::path::PathBuf::from)
 }
 
 fn add_login_shell_arg(command: &mut CommandBuilder) {

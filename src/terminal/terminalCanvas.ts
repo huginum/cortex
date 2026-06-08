@@ -4,7 +4,7 @@ import { DEFAULT_TERMINAL_FONT_SIZE, DEFAULT_TERMINAL_LINE_HEIGHT } from './term
 const DEFAULT_CELL_WIDTH = 8;
 const TERMINAL_PADDING_PX = 10;
 
-export function drawTerminal(canvas: HTMLCanvasElement, snapshot: TerminalSnapshot) {
+export function drawTerminal(canvas: HTMLCanvasElement, snapshot: TerminalSnapshot, focused = true) {
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
 
@@ -46,13 +46,15 @@ export function drawTerminal(canvas: HTMLCanvasElement, snapshot: TerminalSnapsh
     const cursorX = TERMINAL_PADDING_PX + snapshot.cursor.x * cellWidth;
     const cursorY = TERMINAL_PADDING_PX + snapshot.cursor.y * lineHeight;
     ctx.fillStyle = '#e6edf7';
-    if (snapshot.cursor.style === 'bar') {
+    ctx.strokeStyle = '#e6edf7';
+    // An unfocused pane always shows a hollow box so the active pane is the only
+    // one with a solid cursor.
+    if (!focused || snapshot.cursor.style === 'hollowBlock') {
+      ctx.strokeRect(cursorX + 0.5, cursorY + 0.5, cellWidth - 1, lineHeight - 1);
+    } else if (snapshot.cursor.style === 'bar') {
       ctx.fillRect(cursorX, cursorY, 2, lineHeight);
     } else if (snapshot.cursor.style === 'underline') {
       ctx.fillRect(cursorX, cursorY + lineHeight - 2, cellWidth, 2);
-    } else if (snapshot.cursor.style === 'hollowBlock') {
-      ctx.strokeStyle = '#e6edf7';
-      ctx.strokeRect(cursorX + 0.5, cursorY + 0.5, cellWidth - 1, lineHeight - 1);
     } else {
       ctx.fillRect(cursorX, cursorY, cellWidth, lineHeight);
     }

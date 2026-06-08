@@ -1,20 +1,70 @@
-= Terminal
+= Projects and Terminals
 
-The first Cortex implementation opens directly into one local terminal session backed by libghostty-vt.
+Cortex opens into a *project picker*, not a terminal. A project is a git
+repository, much like opening a project in a DAW or video editor: you open the
+project, and its terminals come back the way you left them.
 
-The local shell starts automatically when the window opens. Keyboard input is sent to the shell, and shell output is rendered in the app.
+== Opening a project
 
-When the shell exits, the window closes.
+When Cortex launches it lists the projects you have opened before, most recent
+first. Choose one to open it, or add a new project:
 
-The terminal currently supports the basics expected from a local terminal:
+* *Open repository* — choose a folder that is already a git repository.
+* *Open folder (init)* — choose any folder; if it is not yet a git repository,
+  Cortex initializes one.
+* *Clone from remote* — paste a repository URL and choose where to clone it.
+
+If a project in the list has been moved or deleted it is marked as missing; use
+*Remove* to drop it from the list.
+
+== Working in a project
+
+A freshly opened project has no terminals. The toolbar in the top-right corner
+holds icon buttons for working with panes:
+
+* *Split right* — a panel icon divided by a vertical line; splits the focused
+  pane into a left and right pane.
+* *Split down* — a panel icon divided by a horizontal line; splits the focused
+  pane into a top and bottom pane.
+* *New terminal* (`+`) — adds a terminal. The first one when the project is
+  empty, otherwise a new pane beside the focused one.
+* *Close project* (`×`) — returns to the project picker.
+
+Each pane is an independent local shell backed by libghostty-vt and starts in
+the project's repository root. Drag the divider between two panes to resize them.
+
+Keyboard input goes to the focused pane. The active pane is highlighted with a
+brighter border and shows a solid block cursor; inactive panes show a hollow
+cursor. Click a pane to focus it.
+
+Each terminal supports the basics expected from a local terminal:
 
 * local shell startup
 * terminal keyboard input
 * scrollback
 * mouse-aware applications such as tmux and Neovim
 * text selection, copy, and paste
-* app-window resize handling
+* resize handling
 
-Cortex plans to support your existing Ghostty configuration as much as practical, so users can bring their preferred terminal behavior forward instead of configuring everything again.
+When a pane's shell exits, that pane closes and focus moves to the next pane —
+the app keeps running, even when the last pane closes and leaves the project
+empty.
 
-This first terminal is intentionally minimal. Tabs, splits, richer Ghostty configuration support, image protocols, and agent-attached terminals are planned follow-up capabilities.
+== Saved layout
+
+Cortex saves a project's pane layout (the split arrangement and each pane's
+directory) to `.cortex/layout.json` in the repository. Reopening the project
+restores that layout and starts fresh shells in each pane's directory. The
+layout records panes and directories only — not previous output — so reopening
+gives you clean shells in the right places.
+
+Cortex does not change your git configuration, so `.cortex/layout.json` shows up
+in `git status` like any other file. It is yours to manage: ignore it (add
+`.cortex/` to `.gitignore` or `.git/info/exclude`), commit it to share a default
+workspace with anyone who clones the repository, or simply leave it untracked.
+
+Cortex plans to support your existing Ghostty configuration as much as
+practical, so users can bring their preferred terminal behavior forward instead
+of configuring everything again. Tabs, richer Ghostty configuration support,
+image protocols, and agent-attached terminals are planned follow-up
+capabilities.

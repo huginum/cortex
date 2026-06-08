@@ -6,3 +6,4 @@
 ** ADRs
 *** xref:developer:adrs/0001-use-libghostty-from-first-terminal.adoc[0001 Use libghostty First]
 *** xref:developer:adrs/0002-run-libghostty-vt-in-frontend-wasm.adoc[0002 Frontend WASM]
+*** xref:developer:adrs/0003-projects-as-git-repositories.adoc[0003 Projects Are Git Repositories]

@@ -1,0 +1,66 @@
+= 0003: Projects Are Git Repositories
+
+Status: Accepted
+
+== Context
+
+The bootstrap app opened directly into a single local terminal that owned the
+window, and quit when that shell exited. There was no way to organize work,
+return to a previous setup, or run more than one terminal. We want the unit of
+work to be a project the user opens — the way a DAW or video editor opens a
+project — rather than a lone shell.
+
+== Decision
+
+A project is a git repository. Its repository root anchors the project, and
+terminal working directories are stored relative to that root.
+
+* *Launch shows a project picker*, not a terminal. The picker lists recently
+  opened projects, or offers to add one when none exist.
+* *Adding a project* supports opening an existing repository, opening a folder
+  and running `git init`, or cloning a remote.
+* *A project holds a tree of split panes* (horizontal/vertical), each pane a
+  terminal session.
+* *Two-layer persistence*: the recent-projects list lives in app config (it must
+  be readable before any repository is open); the per-project layout (split tree
+  plus per-pane relative working directory) lives in `<repo>/.cortex/layout.json`.
+* *Cortex does not touch git's ignore configuration.* It writes
+  `<repo>/.cortex/layout.json` and otherwise leaves the repository alone — it
+  edits neither the tracked `.gitignore` nor the local `.git/info/exclude`. How
+  (or whether) `.cortex/` is ignored, committed, or left untracked is the user's
+  decision.
+* *Session lifecycle is decoupled from app lifecycle*: a pane's shell exiting
+  closes that pane only; the app quits only when the user quits it.
+
+== Consequences
+
+Reopening a project restores its layout and spawns *fresh* shells in the saved
+working directories. A saved layout describes panes and directories only — never
+live process state or scrollback — because a shell is a live process that cannot
+be resurrected across restarts.
+
+Because Cortex leaves git untouched, `.cortex/layout.json` appears in
+`git status` like any other new file. The user chooses what to do with it:
+ignore it (via `.gitignore` or `.git/info/exclude`), commit it to share a default
+workspace across clones, or leave it untracked. The recent-projects list can
+reference repositories that were moved or deleted; the picker detects these and
+offers to remove them.
+
+Git operations (validate, init, clone, branch) shell out to the system `git`
+binary rather than adding a Rust git dependency, keeping the dependency surface
+minimal for the simple operations v1 needs.
+
+== Alternatives Considered
+
+* *Store layouts centrally in app config keyed by path*: rejected; the layout
+  belongs with the working copy.
+* *Append `.cortex/` to the tracked `.gitignore`*: rejected; it mutates a file
+  the user commits and shares.
+* *Auto-exclude `.cortex/` via `.git/info/exclude`*: rejected; even though that
+  file is untracked, silently writing into the user's `.git/` directory is
+  surprising, and it pre-decides a question (ignore vs. commit) that belongs to
+  the user.
+* *Restore scrollback as replayed text*: rejected for v1; it would imply a live
+  session that no longer exists.
+* *Use a Rust git library (e.g. gix)*: deferred; a heavier dependency than the
+  init/clone/status operations warrant today.

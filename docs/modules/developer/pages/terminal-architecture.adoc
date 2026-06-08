@@ -4,11 +4,13 @@ The first Cortex terminal implementation uses libghostty from the beginning.
 
 High-level responsibilities:
 
-* React owns the terminal viewport and panel layout.
+* React owns the project picker, the per-project split-pane layout, and the terminal panes.
 * libghostty-vt WebAssembly owns terminal emulation state and plain render extraction.
-* Tauri/Rust owns local PTY session lifecycle, byte transport, resize requests, and terminal setting discovery.
+* Tauri/Rust owns local PTY session lifecycle, byte transport, resize requests, terminal setting discovery, git project operations, and project persistence.
 
-The bootstrap window starts a local shell automatically and closes when that shell exits.
+The app launches into a project picker rather than a terminal. A project is a git repository; opening one restores its saved pane layout (`<repo>/.cortex/layout.json`) and starts a fresh shell in each pane's working directory. `start_terminal` takes a working directory, and a pane's shell exiting closes that pane rather than the app.
+
+Each pane is a `TerminalPane` (the renderer, input, selection, and resize logic). `ProjectView` arranges panes as a binary split tree and tracks the focused pane so input follows focus. The recent-projects list lives in app config; per-project layout lives in the repository under `.cortex/`. Cortex does not modify the repository's git configuration, so `.cortex/` is the user's to ignore or commit.
 
 The terminal code is split so future session backends can attach to nerdbox containers without replacing the frontend terminal renderer.
 

@@ -21,8 +21,9 @@ export async function startLocalTerminal(
   pixelHeight: number,
   onData: (data: Uint8Array) => void,
   onExit: () => void,
+  cwd?: string,
 ): Promise<TerminalTransport> {
-  const sessionId = await invoke<string>('start_terminal', { cols, rows, pixelWidth, pixelHeight });
+  const sessionId = await invoke<string>('start_terminal', { cols, rows, pixelWidth, pixelHeight, cwd });
   const unlistenOutput = await listen<TerminalOutputPayload>('terminal-output', (event) => {
     if (event.payload.sessionId !== sessionId) return;
     onData(new Uint8Array(event.payload.data));
