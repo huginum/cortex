@@ -255,34 +255,43 @@ fn read_in_dir(dir: &Path, name: &str) -> Option<String> {
     Some(buf)
 }
 
-/// Write `contents` to `name` inside `dir`, never following a symlink at the
-/// directory or the file. On Unix the parent directory is opened first with
-/// `O_NOFOLLOW | O_DIRECTORY` and all subsequent operations go through that
-/// pinned fd via `*at` syscalls, so a racing swap of `.cortex` for a symlink
-/// after validation cannot redirect the write. Any pre-existing symlink at
-/// `name` is unlinked first (the link, not its target) so a malicious file is
-/// replaced by a fresh regular file.
+/// Write `contents` to `name` inside `dir` without following a symlink at the
+/// directory or the file, and without ever truncating a pre-existing entry in
+/// place. On Unix the parent directory is opened with `O_NOFOLLOW | O_DIRECTORY`
+/// and all operations go through that pinned fd via `*at` syscalls, so a racing
+/// swap of `.cortex` for a symlink cannot redirect the write. The data is
+/// written to a fresh temp file and `renameat`-ed over `name`: rename repoints
+/// the directory entry atomically, so even if `name` was a hard link to a file
+/// outside the repo, that target's inode is left untouched (and a symlink dest
+/// is replaced, not followed).
 #[cfg(unix)]
 fn write_in_dir(dir: &Path, name: &str, contents: &str) -> Result<(), ProjectError> {
     use std::io::Write;
     use std::os::unix::io::FromRawFd;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
     let dirfd = open_dir_nofollow(dir)?;
     let name_c =
         std::ffi::CString::new(name).map_err(|_| ProjectError::Io("name contains NUL".into()))?;
+    let tmp = format!(
+        ".{name}.{}.{}.tmp",
+        std::process::id(),
+        TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+    );
+    let tmp_c =
+        std::ffi::CString::new(tmp).map_err(|_| ProjectError::Io("temp name contains NUL".into()))?;
 
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    let statted =
-        unsafe { libc::fstatat(dirfd.0, name_c.as_ptr(), &mut stat, libc::AT_SYMLINK_NOFOLLOW) };
-    if statted == 0 && (stat.st_mode & libc::S_IFMT) == libc::S_IFLNK {
-        unsafe { libc::unlinkat(dirfd.0, name_c.as_ptr(), 0) };
-    }
-
+    // Clear any stale/planted entry at the temp name (the entry itself, not a
+    // target it may point at), then create a brand-new regular file: O_EXCL plus
+    // O_NOFOLLOW guarantees we never reuse or follow an existing inode.
+    unsafe { libc::unlinkat(dirfd.0, tmp_c.as_ptr(), 0) };
     let fd = unsafe {
         libc::openat(
             dirfd.0,
-            name_c.as_ptr(),
-            libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            tmp_c.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             0o644,
         )
     };
@@ -292,8 +301,19 @@ fn write_in_dir(dir: &Path, name: &str, contents: &str) -> Result<(), ProjectErr
         ));
     }
     let mut file = unsafe { fs::File::from_raw_fd(fd) };
-    file.write_all(contents.as_bytes())
-        .map_err(|error| ProjectError::Io(error.to_string()))
+    if let Err(error) = file.write_all(contents.as_bytes()) {
+        unsafe { libc::unlinkat(dirfd.0, tmp_c.as_ptr(), 0) };
+        return Err(ProjectError::Io(error.to_string()));
+    }
+    drop(file);
+
+    let renamed = unsafe { libc::renameat(dirfd.0, tmp_c.as_ptr(), dirfd.0, name_c.as_ptr()) };
+    if renamed != 0 {
+        let error = std::io::Error::last_os_error();
+        unsafe { libc::unlinkat(dirfd.0, tmp_c.as_ptr(), 0) };
+        return Err(ProjectError::Io(error.to_string()));
+    }
+    Ok(())
 }
 
 /// An owned directory file descriptor, closed on drop.
@@ -389,6 +409,25 @@ mod tests {
         assert_eq!(fs::read_to_string(&victim).unwrap(), "SECRET-ORIGINAL");
         let layout = repo.join(".cortex").join("layout.json");
         assert!(!fs::symlink_metadata(&layout).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_to_string(&layout).unwrap(), "{\"type\":\"pane\"}");
+    }
+
+    #[test]
+    fn write_layout_does_not_truncate_a_hard_linked_target() {
+        let tmp = TempDir::new(line!());
+        let repo = tmp.0.join("repo");
+        fs::create_dir_all(repo.join(".cortex")).unwrap();
+        let victim = tmp.0.join("victim.txt");
+        fs::write(&victim, "SECRET-ORIGINAL").unwrap();
+        // Attacker hard-links layout.json to a file outside the repo (same fs).
+        fs::hard_link(&victim, repo.join(".cortex").join("layout.json")).unwrap();
+
+        write_layout(repo.to_str().unwrap().into(), "{\"type\":\"pane\"}".into()).unwrap();
+
+        // The hard-linked target keeps its contents; the rename repointed only
+        // the directory entry, and layout.json is now an independent file.
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "SECRET-ORIGINAL");
+        let layout = repo.join(".cortex").join("layout.json");
         assert_eq!(fs::read_to_string(&layout).unwrap(), "{\"type\":\"pane\"}");
     }
 
