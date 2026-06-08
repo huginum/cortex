@@ -229,15 +229,42 @@ pub fn read_layout(root: String) -> Option<String> {
 pub fn write_layout(root: String, contents: String) -> Result<(), ProjectError> {
     let dir = resolve_cortex_dir(Path::new(&root), true)?;
     let file = dir.join("layout.json");
-    // If a malicious repo pre-seeded layout.json as a symlink, remove the link
-    // itself (never its target) so the write below creates a fresh regular file
-    // inside the repo rather than clobbering whatever the link pointed at.
-    if let Ok(meta) = fs::symlink_metadata(&file) {
+    write_no_follow(&file, &contents).map_err(|error| ProjectError::Io(error.to_string()))
+}
+
+/// Write `contents` to `path`, creating or truncating a regular file and never
+/// following a symlink at the final component. On Unix this opens with
+/// `O_NOFOLLOW` so the no-follow guarantee is atomic with the open — a symlink
+/// raced into place cannot redirect the write outside the repo (the open fails
+/// instead). A pre-existing symlink is unlinked first (the link, not its
+/// target) so a malicious layout.json is replaced by a real file.
+#[cfg(unix)]
+fn write_no_follow(path: &Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    if let Ok(meta) = fs::symlink_metadata(path) {
         if meta.file_type().is_symlink() {
-            fs::remove_file(&file).map_err(|error| ProjectError::Io(error.to_string()))?;
+            fs::remove_file(path)?;
         }
     }
-    fs::write(&file, contents).map_err(|error| ProjectError::Io(error.to_string()))
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    file.write_all(contents.as_bytes())
+}
+
+#[cfg(not(unix))]
+fn write_no_follow(path: &Path, contents: &str) -> std::io::Result<()> {
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            fs::remove_file(path)?;
+        }
+    }
+    fs::write(path, contents)
 }
 
 #[cfg(all(test, unix))]

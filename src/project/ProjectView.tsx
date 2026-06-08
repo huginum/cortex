@@ -160,6 +160,7 @@ export function ProjectView({ project, initialLayout, onClose }: ProjectViewProp
               >
                 <TerminalPane
                   cwd={resolveCwd(project.root, pane.cwd)}
+                  root={project.root}
                   focused={pane.id === focusedPaneId}
                   onFocus={() => setFocusedPaneId(pane.id)}
                   onExit={() => close(pane.id)}

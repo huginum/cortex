@@ -10,6 +10,8 @@ type TerminalState = 'idle' | 'starting' | 'ready' | 'error' | 'exited';
 export type TerminalPaneProps = {
   /** Working directory for the shell; defaults to the user's home when omitted. */
   cwd?: string;
+  /** Repository root; the backend confines the shell's cwd to within it. */
+  root?: string;
   /** Called when the shell process exits so the parent can close this pane. */
   onExit: () => void;
   /** Whether this pane currently holds input focus (used for highlighting). */
@@ -18,7 +20,7 @@ export type TerminalPaneProps = {
   onFocus?: () => void;
 };
 
-export function TerminalPane({ cwd, onExit, focused, onFocus }: TerminalPaneProps) {
+export function TerminalPane({ cwd, root, onExit, focused, onFocus }: TerminalPaneProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const screenRef = useRef<HTMLCanvasElement>(null);
   const ghosttyRef = useRef<GhosttyVt | null>(null);
@@ -95,6 +97,7 @@ export function TerminalPane({ cwd, onExit, focused, onFocus }: TerminalPaneProp
           onExit();
         },
         cwd,
+        root,
       );
       transportRef.current = transport;
       setState('ready');
