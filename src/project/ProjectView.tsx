@@ -197,10 +197,12 @@ export function ProjectView({ project, initialLayout, onClose }: ProjectViewProp
  * promises.
  */
 function resolveCwd(root: string, relative: string): string {
-  const base = root.replace(/\/+$/, '');
+  const base = root.replace(/[\\/]+$/, '');
   if (!relative || relative === '.') return base;
   const stack: string[] = [];
-  for (const segment of relative.split('/')) {
+  // Split on both separators: a layout written on Windows (or a crafted one)
+  // may use `\`, which the backend's PathBuf would treat as a separator too.
+  for (const segment of relative.split(/[\\/]+/)) {
     if (segment === '' || segment === '.') continue;
     if (segment === '..') {
       if (stack.length > 0) stack.pop();

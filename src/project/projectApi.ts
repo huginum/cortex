@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
-import type { Layout, LayoutNode } from './layout';
+import { isLayoutNode, type Layout } from './layout';
 
 export type Project = {
   root: string;
@@ -39,11 +39,15 @@ export async function pickDirectory(title: string): Promise<string | null> {
 export async function loadLayout(root: string): Promise<Layout> {
   const raw = await invoke<string | null>('read_layout', { root });
   if (!raw) return null;
+  let parsed: unknown;
   try {
-    return JSON.parse(raw) as LayoutNode;
+    parsed = JSON.parse(raw);
   } catch {
     return null;
   }
+  // The file is repo-controlled; a malformed-but-valid-JSON layout opens as an
+  // empty project rather than crashing project open during hydration.
+  return isLayoutNode(parsed) ? parsed : null;
 }
 
 export function saveLayout(root: string, layout: Layout): Promise<void> {

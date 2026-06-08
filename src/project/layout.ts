@@ -181,6 +181,25 @@ export function placeLayout(layout: Layout, rect: PaneRect = FULL_RECT): Placeme
 }
 
 /**
+ * Validate that an arbitrary parsed value is a structurally sound layout tree.
+ * The document is repo-controlled and may be committed and shared, so a file
+ * that is valid JSON but not a valid layout (e.g. a split missing its children)
+ * must be rejected before `hydrate` descends into it. Orientation and ratio are
+ * left to `hydrate` to normalize, so only structure is checked here.
+ */
+export function isLayoutNode(value: unknown): value is LayoutNode {
+  if (typeof value !== 'object' || value === null) return false;
+  const node = value as Record<string, unknown>;
+  if (node.type === 'pane') {
+    return node.cwd === undefined || typeof node.cwd === 'string';
+  }
+  if (node.type === 'split') {
+    return isLayoutNode(node.first) && isLayoutNode(node.second);
+  }
+  return false;
+}
+
+/**
  * Rebuild a persisted layout with fresh pane ids. The persisted document only
  * carries pane working directories and split structure — never live state — so
  * restoration spawns brand-new shells.
