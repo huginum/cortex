@@ -232,6 +232,8 @@ pub fn write_layout(root: String, contents: String) -> Result<(), ProjectError> 
 /// or the file. On Unix the directory is opened with `O_NOFOLLOW | O_DIRECTORY`
 /// and the file is opened relative to that pinned fd, so swapping `.cortex` for
 /// a symlink after it was validated cannot redirect the read outside the repo.
+/// The file is opened `O_NONBLOCK` and required to be a regular file, so a FIFO
+/// or device planted at `layout.json` cannot block or hang project open.
 #[cfg(unix)]
 fn read_in_dir(dir: &Path, name: &str) -> Option<String> {
     use std::io::Read;
@@ -239,17 +241,23 @@ fn read_in_dir(dir: &Path, name: &str) -> Option<String> {
 
     let dirfd = open_dir_nofollow(dir).ok()?;
     let name_c = std::ffi::CString::new(name).ok()?;
+    // O_NONBLOCK so opening a FIFO returns immediately instead of waiting for a
+    // writer; it has no effect on the subsequent reads of a regular file.
     let fd = unsafe {
         libc::openat(
             dirfd.0,
             name_c.as_ptr(),
-            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
         )
     };
     if fd < 0 {
         return None;
     }
     let mut file = unsafe { fs::File::from_raw_fd(fd) };
+    // Only a regular file is a real layout; reject FIFOs, devices, directories.
+    if !file.metadata().ok()?.file_type().is_file() {
+        return None;
+    }
     let mut buf = String::new();
     file.read_to_string(&mut buf).ok()?;
     Some(buf)
@@ -429,6 +437,21 @@ mod tests {
         assert_eq!(fs::read_to_string(&victim).unwrap(), "SECRET-ORIGINAL");
         let layout = repo.join(".cortex").join("layout.json");
         assert_eq!(fs::read_to_string(&layout).unwrap(), "{\"type\":\"pane\"}");
+    }
+
+    #[test]
+    fn read_layout_ignores_a_fifo_without_hanging() {
+        use std::os::unix::ffi::OsStrExt;
+        let tmp = TempDir::new(line!());
+        let repo = tmp.0.join("repo");
+        fs::create_dir_all(repo.join(".cortex")).unwrap();
+        // A FIFO at layout.json would block a plain blocking open until a writer
+        // appears; read_layout must return None instead.
+        let fifo = repo.join(".cortex").join("layout.json");
+        let fifo_c = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o644) }, 0);
+
+        assert_eq!(read_layout(repo.to_str().unwrap().into()), None);
     }
 
     #[test]
