@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     io::{Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Mutex,
         atomic::{AtomicU64, Ordering},
@@ -23,6 +23,10 @@ struct TerminalSession {
     master: Box<dyn MasterPty + Send>,
     writer: Mutex<Box<dyn Write + Send>>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
+    /// The PTY reader, held until the frontend subscribes. Output streaming does
+    /// not begin until then, so no startup output is emitted before listeners
+    /// are attached. `None` once streaming has started.
+    reader: Mutex<Option<Box<dyn Read + Send>>>,
 }
 
 #[derive(Serialize, Clone)]
@@ -59,12 +63,13 @@ impl serde::Serialize for TerminalError {
 
 #[tauri::command]
 pub fn start_terminal(
-    app: AppHandle,
     manager: State<'_, TerminalManager>,
     cols: u16,
     rows: u16,
     pixel_width: u16,
     pixel_height: u16,
+    cwd: Option<String>,
+    root: Option<String>,
 ) -> Result<String, TerminalError> {
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -83,12 +88,15 @@ pub fn start_terminal(
     command.env("COLORTERM", "truecolor");
     command.env("TERM_PROGRAM", "Cortex");
     command.env("PATH", terminal_path());
+    if let Some(dir) = resolve_cwd(cwd, root) {
+        command.cwd(dir);
+    }
 
     let child = pair
         .slave
         .spawn_command(command)
         .map_err(|error| TerminalError::Pty(error.to_string()))?;
-    let mut reader = pair
+    let reader = pair
         .master
         .try_clone_reader()
         .map_err(|error| TerminalError::Pty(error.to_string()))?;
@@ -101,16 +109,60 @@ pub fn start_terminal(
         "local-{}",
         manager.next_id.fetch_add(1, Ordering::Relaxed) + 1
     );
-    let output_session_id = session_id.clone();
-    let output_app = app.clone();
 
+    // The reader is parked on the session and only drained once the frontend
+    // calls `subscribe_terminal`, after it has attached its listeners — so the
+    // initial prompt (or a fast exit) is never emitted before anyone is
+    // listening, and the PTY buffers it in the meantime.
+    let session = TerminalSession {
+        master: pair.master,
+        writer: Mutex::new(writer),
+        child: Mutex::new(child),
+        reader: Mutex::new(Some(reader)),
+    };
+
+    manager
+        .sessions
+        .lock()
+        .map_err(|_| TerminalError::Lock)?
+        .insert(session_id.clone(), session);
+
+    Ok(session_id)
+}
+
+/// Begin streaming a session's output. The frontend calls this only after it has
+/// registered its `terminal-output`/`terminal-exit` listeners, closing the race
+/// where startup output is emitted before the listeners exist. Taking the reader
+/// makes it a no-op if called more than once.
+#[tauri::command]
+pub fn subscribe_terminal(
+    app: AppHandle,
+    manager: State<'_, TerminalManager>,
+    session_id: String,
+) -> Result<(), TerminalError> {
+    let reader = {
+        let sessions = manager.sessions.lock().map_err(|_| TerminalError::Lock)?;
+        let session = sessions
+            .get(&session_id)
+            .ok_or_else(|| TerminalError::MissingSession(session_id.clone()))?;
+        session
+            .reader
+            .lock()
+            .map_err(|_| TerminalError::Lock)?
+            .take()
+    };
+    let Some(mut reader) = reader else {
+        return Ok(());
+    };
+
+    let output_session_id = session_id;
     thread::spawn(move || {
         let mut buffer = [0_u8; 8192];
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(read) => {
-                    let _ = output_app.emit(
+                    let _ = app.emit(
                         "terminal-output",
                         TerminalOutput {
                             session_id: output_session_id.clone(),
@@ -122,7 +174,7 @@ pub fn start_terminal(
             }
         }
 
-        let _ = output_app.emit(
+        let _ = app.emit(
             "terminal-exit",
             TerminalExit {
                 session_id: output_session_id,
@@ -130,19 +182,40 @@ pub fn start_terminal(
         );
     });
 
-    let session = TerminalSession {
-        master: pair.master,
-        writer: Mutex::new(writer),
-        child: Mutex::new(child),
-    };
+    Ok(())
+}
 
-    manager
-        .sessions
-        .lock()
-        .map_err(|_| TerminalError::Lock)?
-        .insert(session_id.clone(), session);
+/// Pick a working directory for a new shell, confined to the project repository.
+///
+/// The requested directory comes from a repo-controlled layout, so it is
+/// canonicalized — resolving `..` and any symlinks — and accepted only when it
+/// stays inside the canonical repository root. Without this, a committed symlink
+/// such as `outside -> /elsewhere` would pass a plain `is_dir()` check and start
+/// the shell outside the project. Falls back to the repository root (or `HOME`
+/// when no project root is given) so a stale, missing, or rejected path never
+/// prevents a session from starting.
+fn resolve_cwd(cwd: Option<String>, root: Option<String>) -> Option<PathBuf> {
+    let canonical_root = root
+        .map(PathBuf::from)
+        .and_then(|r| r.canonicalize().ok())
+        .filter(|r| r.is_dir());
 
-    Ok(session_id)
+    if let Some(requested) = cwd {
+        if let Ok(path) = PathBuf::from(&requested).canonicalize() {
+            if path.is_dir() {
+                match &canonical_root {
+                    // Within the project root: accept.
+                    Some(root_dir) if path.starts_with(root_dir) => return Some(path),
+                    // No project root to confine against: accept the existing dir.
+                    None => return Some(path),
+                    // Escapes the project root (e.g. via a committed symlink): reject.
+                    Some(_) => {}
+                }
+            }
+        }
+    }
+
+    canonical_root.or_else(|| std::env::var_os("HOME").map(PathBuf::from))
 }
 
 fn add_login_shell_arg(command: &mut CommandBuilder) {
@@ -252,4 +325,69 @@ pub fn stop_terminal(
     child
         .kill()
         .map_err(|error| TerminalError::Pty(error.to_string()))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::resolve_cwd;
+    use std::fs;
+    use std::os::unix::fs::symlink;
+    use std::path::PathBuf;
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(tag: u32) -> Self {
+            let dir = std::env::temp_dir().join(format!("cortex-cwd-{}-{}", std::process::id(), tag));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            TempDir(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn s(path: &std::path::Path) -> String {
+        path.to_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn accepts_a_subdirectory_of_the_repo() {
+        let tmp = TempDir::new(line!());
+        let repo = tmp.0.join("repo");
+        let sub = repo.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+
+        let resolved = resolve_cwd(Some(s(&sub)), Some(s(&repo))).unwrap();
+        assert_eq!(resolved, sub.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn rejects_a_symlink_that_escapes_the_repo() {
+        let tmp = TempDir::new(line!());
+        let repo = tmp.0.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let elsewhere = tmp.0.join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        // A committed symlinked directory pointing outside the repo.
+        symlink(&elsewhere, repo.join("outside")).unwrap();
+
+        let resolved = resolve_cwd(Some(s(&repo.join("outside"))), Some(s(&repo))).unwrap();
+        // Confined to the repo root, not the symlink target.
+        assert_eq!(resolved, repo.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn falls_back_to_repo_root_for_a_missing_cwd() {
+        let tmp = TempDir::new(line!());
+        let repo = tmp.0.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+
+        let resolved = resolve_cwd(Some(s(&repo.join("does-not-exist"))), Some(s(&repo))).unwrap();
+        assert_eq!(resolved, repo.canonicalize().unwrap());
+    }
 }

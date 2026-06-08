@@ -1,15 +1,4 @@
-## Purpose
-
-Define the embedded terminal foundation for Cortex.
-
-## Requirements
-
-### Requirement: Terminal uses libghostty
-The embedded terminal SHALL use libghostty for terminal emulation from the first implementation.
-
-#### Scenario: Verify terminal implementation dependency
-- **WHEN** a developer inspects the terminal subsystem
-- **THEN** terminal emulation is implemented through libghostty rather than a temporary non-Ghostty terminal emulator
+## MODIFIED Requirements
 
 ### Requirement: Terminal renders local shell output
 The system SHALL support multiple concurrent embedded terminal sessions within an open project, each rendering output from its own local shell process and each displayed in its own pane.
@@ -33,19 +22,7 @@ The system SHALL send keyboard input to the shell session of the currently focus
 - **WHEN** a user moves focus from one pane to another and types text
 - **THEN** only the newly focused pane's shell session receives the input bytes
 
-### Requirement: Terminal resizes with viewport
-The system SHALL resize both the terminal emulation state and backend PTY when the terminal viewport dimensions change.
-
-#### Scenario: Resize terminal viewport
-- **WHEN** the terminal viewport size changes
-- **THEN** the terminal session updates its row and column dimensions for rendering and shell interaction
-
-### Requirement: Terminal architecture supports future session backends
-The terminal subsystem SHALL separate session byte transport from terminal rendering so future sessions can attach to non-local-shell backends.
-
-#### Scenario: Review terminal boundaries
-- **WHEN** a developer reviews the terminal subsystem interfaces
-- **THEN** local shell process management is separated from frontend terminal rendering and input handling
+## ADDED Requirements
 
 ### Requirement: Terminals arrange in split panes
 The system SHALL allow the terminals within a project to be arranged as a tree of split panes, supporting both horizontal and vertical splits and an arbitrary number of panes.

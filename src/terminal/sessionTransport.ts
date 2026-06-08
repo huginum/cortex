@@ -21,8 +21,17 @@ export async function startLocalTerminal(
   pixelHeight: number,
   onData: (data: Uint8Array) => void,
   onExit: () => void,
+  cwd?: string,
+  root?: string,
 ): Promise<TerminalTransport> {
-  const sessionId = await invoke<string>('start_terminal', { cols, rows, pixelWidth, pixelHeight });
+  const sessionId = await invoke<string>('start_terminal', {
+    cols,
+    rows,
+    pixelWidth,
+    pixelHeight,
+    cwd,
+    root,
+  });
   const unlistenOutput = await listen<TerminalOutputPayload>('terminal-output', (event) => {
     if (event.payload.sessionId !== sessionId) return;
     onData(new Uint8Array(event.payload.data));
@@ -30,6 +39,10 @@ export async function startLocalTerminal(
   const unlistenExit = await listen<{ sessionId: string }>('terminal-exit', (event) => {
     if (event.payload.sessionId === sessionId) onExit();
   });
+
+  // Start streaming only now that the listeners are attached, so the backend
+  // never emits startup output (or a fast exit) before we can receive it.
+  await invoke('subscribe_terminal', { sessionId });
 
   return {
     sessionId,

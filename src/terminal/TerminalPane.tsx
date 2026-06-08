@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
 import type React from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import { GhosttyVt, type TerminalMouseInput, type TerminalSnapshot } from './ghosttyVt';
 import { startLocalTerminal, type TerminalTransport } from './sessionTransport';
 import { drawTerminal, terminalGeometry } from './terminalCanvas';
@@ -8,16 +7,33 @@ import { loadTerminalSettings, terminalStyle, type TerminalSettings } from './te
 
 type TerminalState = 'idle' | 'starting' | 'ready' | 'error' | 'exited';
 
-export function TerminalViewport() {
+export type TerminalPaneProps = {
+  /** Working directory for the shell; defaults to the user's home when omitted. */
+  cwd?: string;
+  /** Repository root; the backend confines the shell's cwd to within it. */
+  root?: string;
+  /** Called when the shell process exits so the parent can close this pane. */
+  onExit: () => void;
+  /** Whether this pane currently holds input focus (used for highlighting). */
+  focused?: boolean;
+  /** Called when the pane gains focus so the parent can track the active pane. */
+  onFocus?: () => void;
+};
+
+export function TerminalPane({ cwd, root, onExit, focused, onFocus }: TerminalPaneProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const screenRef = useRef<HTMLCanvasElement>(null);
   const ghosttyRef = useRef<GhosttyVt | null>(null);
   const transportRef = useRef<TerminalTransport | null>(null);
   const startedRef = useRef(false);
+  // Set when the component unmounts so an in-flight start() can tear down a
+  // backend session that resolves after we're gone, rather than leaking it.
+  const cancelledRef = useRef(false);
   const drawFrameRef = useRef<number | undefined>(undefined);
   const pressedButtonRef = useRef<TerminalMouseInput['button'] | undefined>(undefined);
   const selectionRef = useRef<{ start: { x: number; y: number }; mode: 'cell' | 'word' } | undefined>(undefined);
   const latestSnapshotRef = useRef<TerminalSnapshot | undefined>(undefined);
+  const focusedRef = useRef(focused);
   const geometryRef = useRef({ cols: 80, rows: 24, pixelWidth: 640, pixelHeight: 408, cellWidth: 8, cellHeight: 15 });
   const [state, setState] = useState<TerminalState>('idle');
   const [hasFrame, setHasFrame] = useState(false);
@@ -29,6 +45,7 @@ export function TerminalViewport() {
     void loadTerminalSettings().then(setSettings);
 
     return () => {
+      cancelledRef.current = true;
       if (drawFrameRef.current !== undefined) cancelAnimationFrame(drawFrameRef.current);
       transportRef.current?.dispose();
       void transportRef.current?.stop();
@@ -36,11 +53,32 @@ export function TerminalViewport() {
     };
   }, []);
 
+  // A pane starts its shell once on mount. The app never auto-starts a terminal
+  // at launch; panes only exist once a project is open and a terminal is added
+  // or restored, so starting here is always an explicit, user-driven action.
   useEffect(() => {
-    if (startedRef.current || state !== 'idle') return;
+    // Re-arm cancellation on every setup. Under React StrictMode (dev) the
+    // effects run mount → unmount → remount synchronously; the unmount sets
+    // cancelledRef, and without this re-arm the in-flight start() would bail
+    // after its awaits and the pane would hang on "Starting shell …". A real
+    // unmount has no re-setup, so cancelledRef stays true and the leak guard
+    // still tears down a late-resolving session.
+    cancelledRef.current = false;
+    if (startedRef.current) return;
     startedRef.current = true;
     void start();
-  }, [state]);
+  }, []);
+
+  // Move keyboard focus to whichever pane the parent marks active, so focus
+  // follows a new pane after a split and the surviving pane after a close. Also
+  // redraw so the cursor switches between solid (focused) and hollow (not).
+  useEffect(() => {
+    focusedRef.current = focused;
+    if (focused) viewportRef.current?.focus();
+    if (hasFrame && screenRef.current && ghosttyRef.current) {
+      drawTerminal(screenRef.current, ghosttyRef.current.snapshot(), focused);
+    }
+  }, [focused, hasFrame]);
 
   async function start() {
     if (!viewportRef.current || state === 'starting' || state === 'ready') return;
@@ -53,6 +91,10 @@ export function TerminalViewport() {
       if (!geometry) return;
       const { cols, rows, pixelWidth, pixelHeight } = geometry;
       const ghostty = await GhosttyVt.create(cols, rows);
+      if (cancelledRef.current) {
+        ghostty.dispose();
+        return;
+      }
       ghosttyRef.current = ghostty;
 
       const transport = await startLocalTerminal(
@@ -67,9 +109,18 @@ export function TerminalViewport() {
         },
         () => {
           setState('exited');
-          void invoke('quit_app');
+          onExit();
         },
+        cwd,
+        root,
       );
+      if (cancelledRef.current) {
+        // Unmounted while the backend session was being created; tear it down
+        // so we never leave an orphaned PTY attached to a dead component.
+        transport.dispose();
+        void transport.stop();
+        return;
+      }
       transportRef.current = transport;
       setState('ready');
       draw();
@@ -85,7 +136,7 @@ export function TerminalViewport() {
     const snapshot = ghosttyRef.current.snapshot();
     latestSnapshotRef.current = snapshot;
     setTerminalBackground(snapshot.background);
-    if (screenRef.current) drawTerminal(screenRef.current, snapshot);
+    if (screenRef.current) drawTerminal(screenRef.current, snapshot, focusedRef.current);
     setHasFrame(true);
   }
 
@@ -107,7 +158,7 @@ export function TerminalViewport() {
     const snapshot = ghosttyRef.current.snapshot();
     latestSnapshotRef.current = snapshot;
     setTerminalBackground(snapshot.background);
-    if (screenRef.current) drawTerminal(screenRef.current, snapshot);
+    if (screenRef.current) drawTerminal(screenRef.current, snapshot, focusedRef.current);
     setHasFrame(true);
   }
 
@@ -121,7 +172,7 @@ export function TerminalViewport() {
 
   useEffect(() => {
     if (!hasFrame || !ghosttyRef.current || !screenRef.current) return;
-    drawTerminal(screenRef.current, ghosttyRef.current.snapshot());
+    drawTerminal(screenRef.current, ghosttyRef.current.snapshot(), focusedRef.current);
   }, [cellWidth, terminalBackground, settings, hasFrame]);
 
   async function resize() {
@@ -330,6 +381,7 @@ export function TerminalViewport() {
         onMouseUp={onMouseUp}
         onMouseMove={onMouseMove}
         onWheel={onWheel}
+        onFocus={onFocus}
         onContextMenu={(event) => event.preventDefault()}
         onCopy={(event) => {
           const text = selectedText(latestSnapshotRef.current);
