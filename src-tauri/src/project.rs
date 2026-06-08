@@ -187,19 +187,141 @@ pub fn clone_project(
     open_project(app, dest)
 }
 
+/// Resolve `<root>/.cortex`, guaranteeing it is a real directory inside the repo
+/// rather than a symlink. `.cortex` is repo-controlled, so a malicious repo could
+/// ship it as a symlink to another directory to redirect our writes outside the
+/// project; refuse to follow it. Creates the directory when `create` is set.
+fn resolve_cortex_dir(root: &Path, create: bool) -> Result<PathBuf, ProjectError> {
+    let dir = root.join(".cortex");
+    match fs::symlink_metadata(&dir) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(ProjectError::Io(
+            ".cortex is a symlink; refusing to follow it".into(),
+        )),
+        Ok(meta) if meta.is_dir() => Ok(dir),
+        Ok(_) => Err(ProjectError::Io(
+            ".cortex exists but is not a directory".into(),
+        )),
+        Err(_) if create => {
+            fs::create_dir(&dir).map_err(|error| ProjectError::Io(error.to_string()))?;
+            Ok(dir)
+        }
+        Err(error) => Err(ProjectError::Io(error.to_string())),
+    }
+}
+
 /// Read a project's saved layout, if any. Returns the raw JSON document so the
-/// frontend owns its shape.
+/// frontend owns its shape. `.cortex` and `layout.json` are repo-controlled, so
+/// a symlinked directory or file is ignored rather than followed (which could
+/// otherwise read an arbitrary file's contents into the app).
 #[tauri::command]
 pub fn read_layout(root: String) -> Option<String> {
-    fs::read_to_string(Path::new(&root).join(".cortex").join("layout.json")).ok()
+    let dir = resolve_cortex_dir(Path::new(&root), false).ok()?;
+    let file = dir.join("layout.json");
+    let meta = fs::symlink_metadata(&file).ok()?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return None;
+    }
+    fs::read_to_string(&file).ok()
 }
 
 /// Persist a project's layout under `<root>/.cortex/layout.json`.
 #[tauri::command]
 pub fn write_layout(root: String, contents: String) -> Result<(), ProjectError> {
-    let root_path = Path::new(&root);
-    let cortex_dir = root_path.join(".cortex");
-    fs::create_dir_all(&cortex_dir).map_err(|error| ProjectError::Io(error.to_string()))?;
-    fs::write(cortex_dir.join("layout.json"), contents)
-        .map_err(|error| ProjectError::Io(error.to_string()))
+    let dir = resolve_cortex_dir(Path::new(&root), true)?;
+    let file = dir.join("layout.json");
+    // If a malicious repo pre-seeded layout.json as a symlink, remove the link
+    // itself (never its target) so the write below creates a fresh regular file
+    // inside the repo rather than clobbering whatever the link pointed at.
+    if let Ok(meta) = fs::symlink_metadata(&file) {
+        if meta.file_type().is_symlink() {
+            fs::remove_file(&file).map_err(|error| ProjectError::Io(error.to_string()))?;
+        }
+    }
+    fs::write(&file, contents).map_err(|error| ProjectError::Io(error.to_string()))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    /// A scratch directory under the system temp dir, removed on drop.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(tag: u32) -> Self {
+            let dir = std::env::temp_dir().join(format!("cortex-test-{}-{}", std::process::id(), tag));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            TempDir(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn write_layout_does_not_clobber_a_symlinked_target() {
+        let tmp = TempDir::new(line!());
+        let repo = tmp.0.join("repo");
+        fs::create_dir_all(repo.join(".cortex")).unwrap();
+        let victim = tmp.0.join("victim.txt");
+        fs::write(&victim, "SECRET-ORIGINAL").unwrap();
+        // Attacker plants layout.json as a symlink to a file outside the repo.
+        symlink(&victim, repo.join(".cortex").join("layout.json")).unwrap();
+
+        write_layout(repo.to_str().unwrap().into(), "{\"type\":\"pane\"}".into()).unwrap();
+
+        // The victim is untouched and the layout is now a real file in the repo.
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "SECRET-ORIGINAL");
+        let layout = repo.join(".cortex").join("layout.json");
+        assert!(!fs::symlink_metadata(&layout).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_to_string(&layout).unwrap(), "{\"type\":\"pane\"}");
+    }
+
+    #[test]
+    fn write_layout_refuses_a_symlinked_cortex_dir() {
+        let tmp = TempDir::new(line!());
+        let repo = tmp.0.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let elsewhere = tmp.0.join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        // Attacker points .cortex at a directory outside the repo.
+        symlink(&elsewhere, repo.join(".cortex")).unwrap();
+
+        let result = write_layout(repo.to_str().unwrap().into(), "{}".into());
+
+        assert!(result.is_err());
+        assert!(!elsewhere.join("layout.json").exists());
+    }
+
+    #[test]
+    fn read_layout_ignores_a_symlinked_file() {
+        let tmp = TempDir::new(line!());
+        let repo = tmp.0.join("repo");
+        fs::create_dir_all(repo.join(".cortex")).unwrap();
+        let secret = tmp.0.join("secret.txt");
+        fs::write(&secret, "TOP SECRET").unwrap();
+        symlink(&secret, repo.join(".cortex").join("layout.json")).unwrap();
+
+        assert_eq!(read_layout(repo.to_str().unwrap().into()), None);
+    }
+
+    #[test]
+    fn layout_round_trips_through_a_real_file() {
+        let tmp = TempDir::new(line!());
+        let repo = tmp.0.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+
+        write_layout(repo.to_str().unwrap().into(), "{\"type\":\"pane\",\"cwd\":\".\"}".into())
+            .unwrap();
+
+        assert_eq!(
+            read_layout(repo.to_str().unwrap().into()),
+            Some("{\"type\":\"pane\",\"cwd\":\".\"}".into())
+        );
+    }
 }
