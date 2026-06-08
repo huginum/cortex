@@ -188,8 +188,25 @@ export function ProjectView({ project, initialLayout, onClose }: ProjectViewProp
   );
 }
 
-/** Resolve a repo-relative pane cwd to an absolute path for the backend. */
+/**
+ * Resolve a repo-relative pane cwd to an absolute path for the backend,
+ * confined to the repository root. A restored `.cortex/layout.json` is
+ * attacker-controllable — it can be committed and shared between clones — so
+ * `..` segments that would climb above the repo are dropped rather than
+ * trusted, keeping shells inside the project as the repo-relative contract
+ * promises.
+ */
 function resolveCwd(root: string, relative: string): string {
-  if (!relative || relative === '.') return root;
-  return `${root.replace(/\/$/, '')}/${relative.replace(/^\.\//, '')}`;
+  const base = root.replace(/\/+$/, '');
+  if (!relative || relative === '.') return base;
+  const stack: string[] = [];
+  for (const segment of relative.split('/')) {
+    if (segment === '' || segment === '.') continue;
+    if (segment === '..') {
+      if (stack.length > 0) stack.pop();
+      continue;
+    }
+    stack.push(segment);
+  }
+  return stack.length > 0 ? `${base}/${stack.join('/')}` : base;
 }
