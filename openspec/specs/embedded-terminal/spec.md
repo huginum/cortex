@@ -20,8 +20,8 @@ microVM.
 - **THEN** that pane displays output from a local shell process
 
 #### Scenario: Open sandbox terminal
-- **WHEN** a project starts a terminal session in a pane with a sandbox backing for a prepared root filesystem
-- **THEN** that pane displays output from a command running inside that root filesystem's microVM
+- **WHEN** a project starts a terminal session in a pane with a sandbox backing for an image reference
+- **THEN** that pane displays output from a command running inside the microVM booted from that image's cached rootfs
 
 #### Scenario: Multiple sessions render independently
 - **WHEN** a project has more than one terminal session open
@@ -65,8 +65,8 @@ The system SHALL allow the terminals within a project to be arranged as a tree o
 
 ### Requirement: Sessions start in a specified working directory
 For host-shell sessions, the system SHALL start the shell in a specified working directory,
-defaulting to the project's repository root when none is specified. Sandbox sessions are started
-from an OCI image and do not take a host working directory.
+defaulting to the project's repository root when none is specified. Sandbox sessions are defined by
+an image reference and do not take a host working directory.
 
 #### Scenario: New host-shell session uses project root
 - **WHEN** a host-shell terminal session is started without a specified working directory
@@ -78,7 +78,7 @@ from an OCI image and do not take a host working directory.
 
 #### Scenario: Sandbox session ignores host working directory
 - **WHEN** a sandbox terminal session is started
-- **THEN** the session is defined by its prepared root filesystem rather than a host working directory
+- **THEN** the session is defined by its image reference rather than a host working directory
 
 ### Requirement: Session exit closes its pane, not the application
 When a terminal session's shell process exits, the system SHALL close that session's pane and SHALL NOT exit the application as a result.
