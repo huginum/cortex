@@ -38,6 +38,8 @@ pub const CONTAINER_HELPER_ARG: &str = "__container-run";
 const DEFAULT_VCPUS: u8 = 2;
 const DEFAULT_RAM_MIB: u32 = 512;
 const DEFAULT_COMMAND: &str = "/bin/sh";
+/// The virtiofs tag libkrun uses for the guest root filesystem (KRUN_FS_ROOT_TAG).
+const KRUN_FS_ROOT_TAG: &[u8] = b"/dev/root";
 
 /// How a sandbox microVM should be booted.
 #[derive(Clone, Debug)]
@@ -251,8 +253,9 @@ pub fn run_agent_in_process(config: &AgentConfig) -> ! {
             eprintln!("cortex container helper: rootfs path contains a NUL byte");
             std::process::exit(2);
         };
-        if ffi::krun_set_root(ctx, root.as_ptr()) < 0 {
-            fail("krun_set_root", -1);
+        let root_tag = CString::new(KRUN_FS_ROOT_TAG).unwrap_or_default();
+        if ffi::krun_add_virtiofs(ctx, root_tag.as_ptr(), root.as_ptr()) < 0 {
+            fail("krun_add_virtiofs", -1);
         }
 
         let Ok(socket) = CString::new(config.socket.as_os_str().as_bytes()) else {
@@ -344,9 +347,10 @@ pub fn run_in_process(config: &SandboxConfig) -> ! {
             eprintln!("cortex sandbox helper: rootfs path contains a NUL byte");
             std::process::exit(2);
         };
-        let ret = ffi::krun_set_root(ctx, root.as_ptr());
+        let root_tag = CString::new(KRUN_FS_ROOT_TAG).unwrap_or_default();
+        let ret = ffi::krun_add_virtiofs(ctx, root_tag.as_ptr(), root.as_ptr());
         if ret < 0 {
-            fail("krun_set_root", ret);
+            fail("krun_add_virtiofs", ret);
         }
 
         let Ok(exec) = CString::new(config.command.as_bytes()) else {
@@ -425,7 +429,13 @@ mod ffi {
     unsafe extern "C" {
         pub fn krun_create_ctx() -> i32;
         pub fn krun_set_vm_config(ctx_id: u32, num_vcpus: u8, ram_mib: u32) -> i32;
-        pub fn krun_set_root(ctx_id: u32, root_path: *const c_char) -> i32;
+        // libkrun 2.x removed krun_set_root; set the root filesystem via virtiofs
+        // with the root tag. Present in both macOS 1.x and Linux 2.x.
+        pub fn krun_add_virtiofs(
+            ctx_id: u32,
+            c_tag: *const c_char,
+            c_path: *const c_char,
+        ) -> i32;
         pub fn krun_set_exec(
             ctx_id: u32,
             exec_path: *const c_char,

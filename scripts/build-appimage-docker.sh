@@ -21,6 +21,7 @@ docker build --platform linux/arm64 -t "$IMAGE" -f docker/appimage.Dockerfile do
 docker run --rm --platform linux/arm64 \
   -v "$PWD:/src:ro" \
   -v "$PWD/dist-linux:/out" \
+  -e CARGO_TARGET_DIR=/build \
   "$IMAGE" sh -lc '
     rsync -a --exclude target --exclude node_modules --exclude dist-linux --exclude .git /src/ /work/ &&
     cd /work &&
