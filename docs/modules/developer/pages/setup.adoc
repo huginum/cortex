@@ -90,6 +90,8 @@ Build it on an *ARM Linux host* — arm64 AppImages can only be built on ARM har
 sh scripts/build-appimage.sh
 ----
 
-The script stages `libkrun.so.1` and `libkrunfw.so.5` into `src-tauri/appimage-libs/` (referenced by `tauri.conf.json`), then builds the AppImage. If your installed sonames differ (e.g. `libkrunfw.so.6`), update the `bundle.linux.appimage.files` map in `tauri.conf.json` to match. At runtime the sandbox helper sets `LD_LIBRARY_PATH` to the bundled library directory.
+The script first builds the in-guest agent (`cortex-init`), which is bundled as a resource (`agent-bin/*`) and injected into each container's rootfs at runtime; then it stages `libkrun.so.1` and `libkrunfw.so.5` into `src-tauri/appimage-libs/` (referenced by `tauri.conf.json`) and builds the AppImage. If your installed sonames differ (e.g. `libkrunfw.so.6`), update the `bundle.linux.appimage.files` map in `tauri.conf.json` to match. At runtime the sandbox/agent helper sets `LD_LIBRARY_PATH` to the bundled library directory.
+
+Building the agent needs the musl cross toolchain on the build host: `rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl`, `cargo install cargo-zigbuild`, and a Zig toolchain.
 
 Sandboxes on Linux require `/dev/kvm`: ensure KVM is enabled and your user is in the `kvm` group.
