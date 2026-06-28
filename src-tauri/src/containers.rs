@@ -129,7 +129,7 @@ pub fn list(root: &Path) -> Vec<Container> {
             serde_json::from_str(&contents).ok()
         })
         .collect();
-    out.sort_by(|a, b| b.created.cmp(&a.created));
+    out.sort_by_key(|c| std::cmp::Reverse(c.created));
     out
 }
 

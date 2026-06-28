@@ -9,6 +9,9 @@ export type Orientation = 'horizontal' | 'vertical';
 /** What a pane's terminal is attached to. */
 export type PaneSession =
   | { kind: 'host'; cwd: string }
+  | { kind: 'container'; id: string; command?: string }
+  // Legacy: a sandbox booted directly from an image (pre-container model). Still
+  // rendered for back-compat; new panes are containers.
   | { kind: 'sandbox'; image: string };
 
 export type PaneNode = {
@@ -49,9 +52,9 @@ export function createPane(cwd = '.'): PaneNode {
   return { type: 'pane', id: newPaneId(), session: { kind: 'host', cwd } };
 }
 
-/** A sandbox pane booting a microVM from the OCI image `image` (a reference). */
-export function createSandboxPane(image: string): PaneNode {
-  return { type: 'pane', id: newPaneId(), session: { kind: 'sandbox', image } };
+/** A pane running a shell exec'd into the container `id`. */
+export function createContainerPane(id: string, command?: string): PaneNode {
+  return { type: 'pane', id: newPaneId(), session: { kind: 'container', id, command } };
 }
 
 /** All panes in tree order. */
@@ -208,6 +211,7 @@ export function isLayoutNode(value: unknown): value is LayoutNode {
     if (session !== undefined) {
       if (typeof session !== 'object' || session === null) return false;
       const s = session as Record<string, unknown>;
+      if (s.kind === 'container') return typeof s.id === 'string';
       if (s.kind === 'sandbox') return typeof s.image === 'string' || typeof s.rootfs === 'string';
       if (s.kind === 'host') return s.cwd === undefined || typeof s.cwd === 'string';
       return false;
@@ -227,9 +231,15 @@ export function isLayoutNode(value: unknown): value is LayoutNode {
  */
 function hydrateSession(node: Record<string, unknown>): PaneSession {
   const session = node.session as Record<string, unknown> | undefined;
+  if (session?.kind === 'container' && typeof session.id === 'string') {
+    return {
+      kind: 'container',
+      id: session.id,
+      command: typeof session.command === 'string' ? session.command : undefined,
+    };
+  }
   if (session?.kind === 'sandbox') {
-    // Prefer the image reference; map a legacy `rootfs` id to a reference so a
-    // sandbox pane saved before image-fetching still resolves on reopen.
+    // Legacy direct-image sandbox pane; still renders via the direct-image path.
     if (typeof session.image === 'string') return { kind: 'sandbox', image: session.image };
     if (typeof session.rootfs === 'string') return { kind: 'sandbox', image: session.rootfs };
   }
