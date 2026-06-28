@@ -47,8 +47,8 @@
 ## 7. Verification
 
 - [x] 7.1 `cargo build`/`clippy` clean (incl. `cortex-init`), `tsc`/`vite` build, container/COW unit tests pass
-- [ ] 7.2 (macOS dev) Create a container from `alpine`, run it, reach a shell; create a named container; run a custom command
-- [ ] 7.3 (macOS dev) Open a second shell into the same running container (and via split); confirm shared filesystem (a file made in one shell is visible in the other)
-- [ ] 7.4 (macOS dev) One shell exits without stopping the container; stop tears down all; remove deletes the rootfs; the image stays clean
-- [ ] 7.5 (macOS dev) Reopen a project and confirm a container pane restores by starting its container and opening a shell
-- [ ] 7.6 (ARM Linux host) Build with the arm64 agent and verify create/run/exec/split on the AppImage
+- [x] 7.2 (macOS dev) Create a container from `alpine`, run it, reach a shell; create a named container; run a custom command
+- [x] 7.3 (macOS dev) Open a second shell into the same running container (and via split); confirm shared filesystem (a file made in one shell is visible in the other)
+- [x] 7.4 (macOS dev) One shell exits without stopping the container; stop tears down all; remove deletes the rootfs; the image stays clean
+- [x] 7.5 (macOS dev) Reopen a project and confirm a container pane restores by starting its container and opening a shell
+- [x] 7.6 (ARM Linux host) Build with the arm64 agent and verify create/run/exec/split on the AppImage

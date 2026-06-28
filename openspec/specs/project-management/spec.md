@@ -55,18 +55,19 @@ The system SHALL persist the recent-projects list in application configuration, 
 ### Requirement: Project layout persists in local application storage
 The system SHALL persist a project's terminal layout — the split-pane tree and, for each pane, its
 session kind together with the data that kind requires (a host-shell pane's working directory
-relative to the repository root, or a sandbox pane's image reference) — in the application
-configuration directory, keyed by the project's canonical repository root path. A pane with no
-recorded session kind SHALL be treated as a host-shell pane for backward compatibility. The system
-SHALL NOT create, read, or modify any path inside the repository working tree for layout storage.
+relative to the repository root, or a container pane's container reference and command) — in the
+application configuration directory, keyed by the project's canonical repository root path. A pane
+with no recorded session kind SHALL be treated as a host-shell pane for backward compatibility. The
+system SHALL NOT create, read, or modify any path inside the repository working tree for layout
+storage.
 
 #### Scenario: Layout saved on change
 - **WHEN** a project's pane layout changes (a pane is added, removed, split, its working directory changes, or its session kind changes)
 - **THEN** the system writes the updated layout to a file in the application configuration directory keyed by the project's canonical repository root path
 
 #### Scenario: Pane session kind is persisted
-- **WHEN** a project has both a host-shell pane and a sandbox pane
-- **THEN** the saved layout records each pane's session kind and the data that kind requires, including a sandbox pane's image reference
+- **WHEN** a project has both a host-shell pane and a container pane
+- **THEN** the saved layout records each pane's session kind and the data that kind requires, including a container pane's container reference
 
 #### Scenario: Legacy layout loads as host shells
 - **WHEN** a saved layout predates session kinds and records panes without a session kind
@@ -87,17 +88,21 @@ SHALL NOT create, read, or modify any path inside the repository working tree fo
 ### Requirement: Reopening a project restores its layout with fresh shells
 When a project with a saved layout is reopened, the system SHALL restore the split-pane arrangement
 and start a fresh session for each pane according to its recorded kind: a host-shell pane starts a
-fresh shell in its saved working directory, and a sandbox pane resolves its recorded image reference
-to a cached rootfs (fetching if absent) and starts a fresh microVM from it. The system SHALL NOT
-attempt to restore live process or VM state or prior scrollback.
+fresh shell in its saved working directory, and a container pane resolves its recorded container,
+starts it if it is not running, and opens a fresh shell in it. The system SHALL NOT attempt to
+restore live process or VM state or prior scrollback.
 
 #### Scenario: Reopen a project that had host-shell panes
 - **WHEN** a user reopens a project whose saved layout describes one or more host-shell panes
 - **THEN** the system recreates that pane arrangement and starts a fresh shell in each pane's saved working directory
 
-#### Scenario: Reopen a project that had a sandbox pane
-- **WHEN** a user reopens a project whose saved layout describes a sandbox pane
-- **THEN** the system recreates that pane, resolves the recorded image reference to a cached rootfs (fetching if absent), and starts a fresh microVM from it
+#### Scenario: Reopen a project that had a container pane
+- **WHEN** a user reopens a project whose saved layout describes a container pane
+- **THEN** the system recreates that pane, starts the recorded container if needed, and opens a fresh shell in it
+
+#### Scenario: Reopen a project whose container was removed
+- **WHEN** a user reopens a project whose saved layout references a container that no longer exists
+- **THEN** the system reports the container is unavailable for that pane and does not start a session there
 
 ### Requirement: A new project opens with no panes
 When a project is opened for the first time and has no saved layout, the system SHALL open it with no terminal panes and present an affordance to add the first terminal.

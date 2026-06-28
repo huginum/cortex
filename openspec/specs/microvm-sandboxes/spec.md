@@ -4,18 +4,19 @@
 TBD - created by archiving change run-microvm-sandboxes. Update Purpose after archive.
 ## Requirements
 ### Requirement: Sandbox runs from a prepared root filesystem
-The system SHALL boot a microVM from a prepared root filesystem and run an interactive command
-inside it on a pseudo-terminal, so that its input and output stream the same way as a local shell
-session. Acquiring a root filesystem by pulling and unpacking an OCI image is out of scope for this
-capability's first version.
+The system SHALL boot a microVM from a container's copy-on-write root filesystem with a guest init
+agent as its init process, and SHALL run interactive commands inside it as exec sessions over a
+host↔guest channel, so their input and output stream the same way as a local shell session. The
+container rootfs is cloned from an immutable cached image; pulling images is covered by the
+`container-images` capability.
 
 #### Scenario: Run a shell in a sandbox
-- **WHEN** a sandbox session is started for a prepared root filesystem with an interactive command such as `/bin/sh`
-- **THEN** the system boots a microVM from that root filesystem and the session streams the command's output
+- **WHEN** a sandbox session is started for a running container with an interactive command such as `/bin/sh`
+- **THEN** the system runs that command inside the container's microVM and the session streams its output
 
-#### Scenario: Root filesystem is not available
-- **WHEN** a sandbox session is requested for a root filesystem that is not available
-- **THEN** the system reports that the root filesystem is unavailable and does not start a session
+#### Scenario: Container root filesystem is not available
+- **WHEN** a sandbox session is requested for a container whose root filesystem is missing
+- **THEN** the system reports that the container is unavailable and does not start a session
 
 ### Requirement: Sandbox session runs in its own child process
 A sandbox session SHALL run its microVM in a dedicated child process whose standard input and output
