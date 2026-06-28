@@ -262,6 +262,16 @@ pub fn run_agent_in_process(config: &AgentConfig) -> ! {
             eprintln!("cortex container helper: socket path contains a NUL byte");
             std::process::exit(2);
         };
+        // libkrun 2.x (Linux) has no implicit vsock device; create one (no TSI
+        // hijacking) so the port mapping below is accepted. macOS 1.x creates it
+        // implicitly, and calling this there would conflict, so it is Linux-only.
+        #[cfg(target_os = "linux")]
+        {
+            let ret = ffi::krun_add_vsock(ctx, 0);
+            if ret < 0 {
+                fail("krun_add_vsock", ret);
+            }
+        }
         // listen=true: the guest agent listens on the vsock port; the host
         // initiates connections through `socket`.
         let ret = ffi::krun_add_vsock_port2(
@@ -448,6 +458,11 @@ mod ffi {
             c_filepath: *const c_char,
             listen: bool,
         ) -> i32;
+        // Creates a vsock device. libkrun 2.x (Linux) does not create one
+        // implicitly, so a port mapping is rejected with ENODEV without this.
+        // Only called on Linux (macOS creates the device implicitly).
+        #[allow(dead_code)]
+        pub fn krun_add_vsock(ctx_id: u32, tsi_features: u32) -> i32;
         pub fn krun_start_enter(ctx_id: u32) -> i32;
     }
 }
