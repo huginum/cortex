@@ -24,8 +24,8 @@ stage_lib() {
   base="${soname%%.so*}.so"
   found="$(ldconfig -p 2>/dev/null | grep -oE "/[^ ]*${base}[^ ]*" | head -n1 || true)"
   if [ -z "$found" ]; then
-    for dir in /usr/lib /usr/local/lib /usr/lib/aarch64-linux-gnu /lib/aarch64-linux-gnu; do
-      cand="$(ls "$dir/${base}"* 2>/dev/null | head -n1 || true)"
+    for dir in /usr/local/lib64 /usr/lib /usr/local/lib /usr/lib/aarch64-linux-gnu /lib/aarch64-linux-gnu; do
+      cand="$(ls "$dir/${soname}" 2>/dev/null | head -n1 || true)"
       [ -n "$cand" ] && found="$cand" && break
     done
   fi
@@ -38,7 +38,7 @@ stage_lib() {
   echo "Staged $soname from $found"
 }
 
-stage_lib libkrun.so.1
+stage_lib libkrun.so.2
 stage_lib libkrunfw.so.5
 
 npm run tauri:build -- --bundles appimage

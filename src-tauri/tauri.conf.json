@@ -39,7 +39,7 @@
     "linux": {
       "appimage": {
         "files": {
-          "usr/lib/libkrun.so.1": "appimage-libs/libkrun.so.1",
+          "usr/lib/libkrun.so.2": "appimage-libs/libkrun.so.2",
           "usr/lib/libkrunfw.so.5": "appimage-libs/libkrunfw.so.5"
         }
       }
