@@ -7,8 +7,14 @@ fn main() {
     // process. See `sandbox.rs`.
     let mut args = std::env::args_os();
     let _exe = args.next();
-    if matches!(args.next(), Some(arg) if arg == cortex_lib::sandbox::SANDBOX_HELPER_ARG) {
-        cortex_lib::sandbox::run_helper(args);
+    match args.next() {
+        Some(arg) if arg == cortex_lib::sandbox::SANDBOX_HELPER_ARG => {
+            cortex_lib::sandbox::run_helper(args);
+        }
+        Some(arg) if arg == cortex_lib::sandbox::CONTAINER_HELPER_ARG => {
+            cortex_lib::sandbox::run_agent_helper(args);
+        }
+        _ => {}
     }
 
     cortex_lib::run()

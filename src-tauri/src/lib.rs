@@ -1,3 +1,4 @@
+pub mod container_runtime;
 pub mod containers;
 pub mod images;
 mod project;
@@ -5,7 +6,9 @@ pub mod sandbox;
 mod settings;
 mod terminal;
 
-use tauri::{Emitter, Manager};
+use tauri::{Emitter, Manager, State};
+
+use container_runtime::ContainerRuntime;
 
 #[tauri::command]
 fn quit_app(app: tauri::AppHandle) {
@@ -69,6 +72,26 @@ fn remove_container(
     containers::remove(&root, &id)
 }
 
+/// Start a container's agent microVM (if not already running).
+#[tauri::command]
+fn run_container(
+    app: tauri::AppHandle,
+    runtime: State<'_, ContainerRuntime>,
+    id: String,
+) -> Result<(), String> {
+    container_runtime::ensure_running(&app, &runtime, &id).map(|_| ())
+}
+
+/// Stop a running container's microVM (its rootfs is preserved).
+#[tauri::command]
+fn stop_container(
+    app: tauri::AppHandle,
+    runtime: State<'_, ContainerRuntime>,
+    id: String,
+) -> Result<(), String> {
+    container_runtime::stop(&app, &runtime, &id)
+}
+
 /// Cached OCI images a sandbox can boot from, listed by `name:tag`.
 #[tauri::command]
 fn list_images(app: tauri::AppHandle) -> Vec<images::ImageEntry> {
@@ -104,9 +127,11 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             app.set_menu(tauri::menu::Menu::default(app.handle())?)?;
+            container_runtime::cleanup_on_start(app.handle());
             Ok(())
         })
         .manage(terminal::TerminalManager::default())
+        .manage(ContainerRuntime::default())
         .invoke_handler(tauri::generate_handler![
             settings::get_terminal_settings,
             terminal::start_terminal,
@@ -127,6 +152,8 @@ pub fn run() {
             create_container,
             list_containers,
             remove_container,
+            run_container,
+            stop_container,
             quit_app,
         ])
         .run(tauri::generate_context!())

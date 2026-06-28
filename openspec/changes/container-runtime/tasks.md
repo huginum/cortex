@@ -16,17 +16,17 @@
 
 ## 3. Host: boot the agent VM + exec transport
 
-- [ ] 3.1 Inject the matching `cortex-init` into a container rootfs on run (refresh each run); boot the VM with `krun_set_exec(/.cortex/init)` and `krun_add_vsock_port2(port, <id>/agent.sock, listen=true)`
-- [ ] 3.2 Container manager: one agent VM (helper process) per running container; own `<id>/agent.sock`; track running state; stop tears down the VM and socket
-- [ ] 3.3 Define the framed vsock protocol (host side): `Exec`, `Data`, `Resize`, `Exit`; length-prefixed
-- [ ] 3.4 Exec-session transport: connect to `<id>/agent.sock`, send `Exec`, then bridge `Data` ⇄ `terminal-output`/`write_terminal` and `Resize`/`Exit`, integrated alongside the host-shell PTY path in `terminal.rs`
-- [ ] 3.5 Startup cleanup of stale sockets / mark crashed containers stopped
+- [x] 3.1 Inject the matching `cortex-init` into a container rootfs on run (refresh each run); boot the VM with `krun_set_exec(/.cortex/init)` and `krun_add_vsock_port2(port, <id>/agent.sock, listen=true)`
+- [x] 3.2 Container manager: one agent VM (helper process) per running container; own `<id>/agent.sock`; track running state; stop tears down the VM and socket
+- [x] 3.3 Define the framed vsock protocol (host side): `Exec`, `Data`, `Resize`, `Exit`; length-prefixed
+- [x] 3.4 Exec-session transport: connect to `<id>/agent.sock`, send `Exec`, then bridge `Data` ⇄ `terminal-output`/`write_terminal` and `Resize`/`Exit`, integrated alongside the host-shell PTY path in `terminal.rs`
+- [x] 3.5 Startup cleanup of stale sockets / mark crashed containers stopped
 
 ## 4. Exec lifecycle + Tauri commands
 
-- [ ] 4.1 `run_container(id)` (start agent VM if needed), `exec_shell(id, command?)` → a terminal session, `stop_container(id)`
-- [ ] 4.2 First exec starts the container; subsequent execs attach to the running VM; closing the last shell leaves it running (until stopped)
-- [ ] 4.3 One shell exiting ends only its session; stopping ends all
+- [x] 4.1 `run_container(id)` (start agent VM if needed), `exec_shell(id, command?)` → a terminal session, `stop_container(id)`
+- [x] 4.2 First exec starts the container; subsequent execs attach to the running VM; closing the last shell leaves it running (until stopped)
+- [x] 4.3 One shell exiting ends only its session; stopping ends all
 
 ## 5. Frontend: containers, custom command, context-aware split
 
