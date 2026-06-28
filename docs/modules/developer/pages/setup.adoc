@@ -63,16 +63,33 @@ To avoid the two-terminal dance, `npm run dev:signed` builds, signs, and runs th
 
 Release builds (`npm run tauri:build`) pick up `Entitlements.plist` from `tauri.conf.json`; set your Developer ID signing identity in the environment so the bundle is signed and notarizable.
 
-=== Prepare a rootfs
+=== Running containers
 
-v1 boots from a prepared root filesystem directory; it does not yet pull OCI images. Place each rootfs as a subdirectory of the `rootfs` folder in the app config directory:
+Open the sandbox menu in the project toolbar (the cube icon), type an image reference (e.g. `ubuntu:24.04` or `alpine:latest`) and press Run, or pick a previously fetched image. Cortex pulls the image in pure Rust (no Docker/skopeo/buildah), unpacks its layers into a cache, and boots a microVM from it into a terminal pane.
+
+Images are pulled for the host CPU architecture's Linux variant and cached under the app data dir:
 
 [source,sh]
 ----
 # macOS
-~/Library/Application Support/com.huginum.cortex/rootfs/<name>/
+~/Library/Application Support/com.huginum.cortex/images/<ref>/rootfs/
 # Linux
-~/.config/com.huginum.cortex/rootfs/<name>/
+~/.local/share/com.huginum.cortex/images/<ref>/rootfs/
 ----
 
-Each `<name>` subdirectory is one bootable rootfs (it must contain the target executable, e.g. `/bin/sh`). The sandbox menu in the project toolbar lists these by name; selecting one opens a sandbox terminal pane booted from it.
+v1 pulls public images anonymously; private-registry authentication is not yet supported.
+
+=== Self-contained Linux build (AppImage)
+
+The Linux AppImage embeds libkrun and libkrunfw, so it runs sandboxes without a separate VMM install (the host still needs `/dev/kvm`).
+
+Build it on an *ARM Linux host* — arm64 AppImages can only be built on ARM hardware. The build host needs the toolchain (Rust, Node, WebKitGTK 4.1, and libkrun for linking; set `LIBKRUN_LIB_DIR` if libkrun is not on the default path):
+
+[source,sh]
+----
+sh scripts/build-appimage.sh
+----
+
+The script stages `libkrun.so.1` and `libkrunfw.so.5` into `src-tauri/appimage-libs/` (referenced by `tauri.conf.json`), then builds the AppImage. If your installed sonames differ (e.g. `libkrunfw.so.6`), update the `bundle.linux.appimage.files` map in `tauri.conf.json` to match. At runtime the sandbox helper sets `LD_LIBRARY_PATH` to the bundled library directory.
+
+Sandboxes on Linux require `/dev/kvm`: ensure KVM is enabled and your user is in the `kvm` group.
