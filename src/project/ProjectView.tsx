@@ -1,29 +1,32 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type React from 'react';
 import { TerminalPane } from '../terminal/TerminalPane';
+import type { SessionDescriptor } from '../terminal/sessionTransport';
 import {
   closePane,
   collectPanes,
   createPane,
-  createSandboxPane,
+  createContainerPane,
   firstPaneId,
   placeLayout,
   setRatio,
   splitPane,
   type Layout,
   type Orientation,
+  type PaneNode,
   type PaneRect,
 } from './layout';
 import { saveLayout, type Project } from './projectApi';
 import { CloseIcon, CubeIcon, PlusIcon, SplitColumnsIcon, SplitRowsIcon } from './icons';
+import { onPullProgress, pullImage, sandboxSupport, type SandboxSupport } from '../sandbox/sandboxApi';
 import {
-  listImages,
-  onPullProgress,
-  pullImage,
-  sandboxSupport,
-  type ImageEntry,
-  type SandboxSupport,
-} from '../sandbox/sandboxApi';
+  createContainer,
+  listContainers,
+  removeContainer,
+  runContainer,
+  stopContainer,
+  type Container,
+} from '../container/containerApi';
 
 type ProjectViewProps = {
   project: Project;
@@ -38,12 +41,14 @@ type Drag = { id: string; orientation: Orientation; region: PaneRect };
 export function ProjectView({ project, initialLayout, onClose }: ProjectViewProps) {
   const [layout, setLayout] = useState<Layout>(initialLayout);
   const [focusedPaneId, setFocusedPaneId] = useState<string | undefined>(() => firstPaneId(initialLayout));
-  const [sandboxMenuOpen, setSandboxMenuOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const [support, setSupport] = useState<SandboxSupport | null>(null);
-  const [images, setImages] = useState<ImageEntry[]>([]);
+  const [containers, setContainers] = useState<Container[]>([]);
   const [imageInput, setImageInput] = useState('');
-  const [pulling, setPulling] = useState<{ reference: string; phase: string } | null>(null);
-  const [pullError, setPullError] = useState<string | null>(null);
+  const [nameInput, setNameInput] = useState('');
+  const [commandInput, setCommandInput] = useState('');
+  const [busy, setBusy] = useState<string | null>(null);
+  const [menuError, setMenuError] = useState<string | null>(null);
   const skipNextSave = useRef(true);
   const rootRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<Drag | null>(null);
@@ -89,19 +94,44 @@ export function ProjectView({ project, initialLayout, onClose }: ProjectViewProp
     }
   }, [layout, focusedPaneId]);
 
+  // Load the container list once so container panes can show their names.
+  useEffect(() => {
+    void listContainers().then(setContainers);
+  }, []);
+
   function addFirstPane() {
     const pane = createPane('.');
     setLayout(pane);
     setFocusedPaneId(pane.id);
   }
 
+  function focusedPane(): PaneNode | undefined {
+    return collectPanes(layout).find((pane) => pane.id === focusedPaneId);
+  }
+
+  // Context-aware split: another shell in the same container when the focused
+  // pane is a container, otherwise another host shell.
   function split(orientation: Orientation) {
     if (!focusedPaneId) {
       addFirstPane();
       return;
     }
-    const pane = createPane('.');
+    const focused = focusedPane();
+    const pane =
+      focused?.session.kind === 'container'
+        ? createContainerPane(focused.session.id, focused.session.command)
+        : createPane('.');
     setLayout((current) => splitPane(current, focusedPaneId, orientation, pane));
+    setFocusedPaneId(pane.id);
+  }
+
+  // Add a pane the same way "+" does: first pane, or split off the focused one.
+  function addPane(pane: PaneNode) {
+    if (!focusedPaneId) {
+      setLayout(pane);
+    } else {
+      setLayout((current) => splitPane(current, focusedPaneId, 'horizontal', pane));
+    }
     setFocusedPaneId(pane.id);
   }
 
@@ -119,51 +149,90 @@ export function ProjectView({ project, initialLayout, onClose }: ProjectViewProp
     setLayout((current) => closePane(current, targetId));
   }
 
-  // Open (or close) the sandbox menu, refreshing host support and the cached
-  // image list each time it opens.
-  function toggleSandboxMenu() {
-    const next = !sandboxMenuOpen;
-    setSandboxMenuOpen(next);
+  const refreshContainers = useCallback(() => {
+    void listContainers().then(setContainers);
+  }, []);
+
+  // Open (or close) the container menu, refreshing host support and the
+  // container list each time it opens.
+  function toggleMenu() {
+    const next = !menuOpen;
+    setMenuOpen(next);
     if (next) {
-      setPullError(null);
+      setMenuError(null);
       void sandboxSupport().then(setSupport);
-      void listImages().then(setImages);
+      refreshContainers();
     }
   }
 
-  // Open a sandbox pane booted from `image`: the first pane when the project is
-  // empty, otherwise split off the focused pane — mirroring how host panes add.
-  function openSandboxPane(image: string) {
-    const pane = createSandboxPane(image);
-    if (!focusedPaneId) {
-      setLayout(pane);
-    } else {
-      setLayout((current) => splitPane(current, focusedPaneId, 'horizontal', pane));
-    }
-    setFocusedPaneId(pane.id);
-    setSandboxMenuOpen(false);
+  // Open a shell pane into a container, starting it if needed.
+  function openContainerPane(id: string, command?: string) {
+    addPane(createContainerPane(id, command));
+    setMenuOpen(false);
   }
 
-  // Run a container: ensure the image is cached (pulling with progress), then
-  // open a sandbox pane. A pull failure is reported without opening a pane.
-  async function runImage(reference: string) {
-    const ref = reference.trim();
-    if (!ref || pulling) return;
-    setPullError(null);
-    setPulling({ reference: ref, phase: 'starting' });
-    const unlisten = await onPullProgress((progress) =>
-      setPulling({ reference: ref, phase: progress.phase }),
-    );
+  // Create + run a container from an image: pull the image (with progress),
+  // create the container (COW), start it, and open a shell pane.
+  async function createAndRun() {
+    const image = imageInput.trim();
+    if (!image || busy) return;
+    const name = nameInput.trim() || undefined;
+    const command = commandInput.trim() || undefined;
+    setMenuError(null);
+    setBusy('pulling image…');
+    const unlisten = await onPullProgress((progress) => setBusy(`image: ${progress.phase}…`));
     try {
-      await pullImage(ref);
-      openSandboxPane(ref);
+      await pullImage(image);
+      setBusy('creating container…');
+      const container = await createContainer(image, name, command);
+      setBusy('starting container…');
+      await runContainer(container.id);
+      openContainerPane(container.id, command);
       setImageInput('');
-      void listImages().then(setImages);
+      setNameInput('');
+      setCommandInput('');
+      refreshContainers();
     } catch (error) {
-      setPullError(String(error));
+      setMenuError(String(error));
     } finally {
       unlisten();
-      setPulling(null);
+      setBusy(null);
+    }
+  }
+
+  // Open a shell into an existing container (starting it if stopped).
+  async function runExisting(container: Container) {
+    if (busy) return;
+    setMenuError(null);
+    setBusy('starting container…');
+    try {
+      await runContainer(container.id);
+      openContainerPane(container.id, undefined);
+      refreshContainers();
+    } catch (error) {
+      setMenuError(String(error));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function stopExisting(id: string) {
+    setMenuError(null);
+    try {
+      await stopContainer(id);
+      refreshContainers();
+    } catch (error) {
+      setMenuError(String(error));
+    }
+  }
+
+  async function removeExisting(id: string) {
+    setMenuError(null);
+    try {
+      await removeContainer(id);
+      refreshContainers();
+    } catch (error) {
+      setMenuError(String(error));
     }
   }
 
@@ -195,6 +264,24 @@ export function ProjectView({ project, initialLayout, onClose }: ProjectViewProp
     window.addEventListener('pointerup', onDragEnd);
   }
 
+  // Map a pane's persisted session to a transport descriptor + display label.
+  function paneBacking(pane: PaneNode): { session: SessionDescriptor; label?: string } {
+    const session = pane.session;
+    if (session.kind === 'container') {
+      const container = containers.find((c) => c.id === session.id);
+      const name = container?.name ?? session.id.slice(0, 8);
+      const label =
+        session.command && session.command !== '/bin/sh' ? `${name} · ${session.command}` : name;
+      return { session: { kind: 'container', id: session.id, command: session.command }, label };
+    }
+    if (session.kind === 'sandbox') {
+      return { session: { kind: 'sandbox', image: session.image }, label: session.image };
+    }
+    return {
+      session: { kind: 'host', cwd: resolveCwd(project.root, session.cwd), root: project.root },
+    };
+  }
+
   const { panes, dividers } = placeLayout(layout);
 
   return (
@@ -217,23 +304,23 @@ export function ProjectView({ project, initialLayout, onClose }: ProjectViewProp
           <div className="sandbox-menu-anchor">
             <button
               type="button"
-              className={sandboxMenuOpen ? 'icon-button icon-button-active' : 'icon-button'}
-              title="New sandbox"
-              onClick={toggleSandboxMenu}
+              className={menuOpen ? 'icon-button icon-button-active' : 'icon-button'}
+              title="Containers"
+              onClick={toggleMenu}
             >
               <CubeIcon />
             </button>
-            {sandboxMenuOpen ? (
-              <div className="sandbox-menu" role="menu">
+            {menuOpen ? (
+              <div className="sandbox-menu sandbox-menu-wide" role="menu">
                 {support && !support.supported ? (
                   <p className="sandbox-menu-note">{support.reason}</p>
                 ) : (
                   <>
                     <form
-                      className="sandbox-run-form"
+                      className="sandbox-run-form sandbox-run-form-stacked"
                       onSubmit={(event) => {
                         event.preventDefault();
-                        void runImage(imageInput);
+                        void createAndRun();
                       }}
                     >
                       <input
@@ -241,44 +328,73 @@ export function ProjectView({ project, initialLayout, onClose }: ProjectViewProp
                         placeholder="image, e.g. ubuntu:24.04"
                         value={imageInput}
                         onChange={(event) => setImageInput(event.target.value)}
-                        disabled={!!pulling}
+                        disabled={!!busy}
                         // eslint-disable-next-line jsx-a11y/no-autofocus
                         autoFocus
                       />
-                      <button
-                        type="submit"
-                        className="sandbox-run-button"
-                        disabled={!!pulling || !imageInput.trim()}
-                      >
-                        Run
+                      <div className="sandbox-run-row">
+                        <input
+                          className="sandbox-run-input"
+                          placeholder="name (optional)"
+                          value={nameInput}
+                          onChange={(event) => setNameInput(event.target.value)}
+                          disabled={!!busy}
+                        />
+                        <input
+                          className="sandbox-run-input"
+                          placeholder="command (default /bin/sh)"
+                          value={commandInput}
+                          onChange={(event) => setCommandInput(event.target.value)}
+                          disabled={!!busy}
+                        />
+                      </div>
+                      <button type="submit" className="sandbox-run-button" disabled={!!busy || !imageInput.trim()}>
+                        Create &amp; run
                       </button>
                     </form>
-                    {pulling ? (
-                      <p className="sandbox-menu-note">
-                        Pulling {pulling.reference} — {pulling.phase}…
-                      </p>
-                    ) : null}
-                    {pullError ? (
-                      <p className="sandbox-menu-note sandbox-menu-error">{pullError}</p>
-                    ) : null}
-                    {images.length > 0 ? (
+                    {busy ? <p className="sandbox-menu-note">{busy}</p> : null}
+                    {menuError ? <p className="sandbox-menu-note sandbox-menu-error">{menuError}</p> : null}
+
+                    {containers.length > 0 ? (
                       <div className="sandbox-menu-list">
-                        {images.map((image) => (
-                          <button
-                            key={image.reference}
-                            type="button"
-                            className="sandbox-menu-item"
-                            role="menuitem"
-                            onClick={() => void runImage(image.reference)}
-                            disabled={!!pulling}
-                          >
-                            {image.label}
-                          </button>
+                        {containers.map((container) => (
+                          <div key={container.id} className="container-row">
+                            <button
+                              type="button"
+                              className="sandbox-menu-item container-row-main"
+                              title={`Open a shell in ${container.name}`}
+                              onClick={() => void runExisting(container)}
+                              disabled={!!busy}
+                            >
+                              <span className={container.running ? 'container-dot running' : 'container-dot'} />
+                              <span className="container-name">{container.name}</span>
+                              <span className="container-image">{container.image}</span>
+                            </button>
+                            {container.running ? (
+                              <button
+                                type="button"
+                                className="container-action"
+                                title="Stop"
+                                onClick={() => void stopExisting(container.id)}
+                              >
+                                ■
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                className="container-action"
+                                title="Remove"
+                                onClick={() => void removeExisting(container.id)}
+                              >
+                                ✕
+                              </button>
+                            )}
+                          </div>
                         ))}
                       </div>
                     ) : (
                       <p className="sandbox-menu-note">
-                        No images yet. Type a reference above to fetch and run one.
+                        No containers yet. Enter an image above to create and run one.
                       </p>
                     )}
                   </>
@@ -303,11 +419,7 @@ export function ProjectView({ project, initialLayout, onClose }: ProjectViewProp
         ) : (
           <div className="layout-root" ref={rootRef}>
             {panes.map(({ pane, rect }) => {
-              const session =
-                pane.session.kind === 'sandbox'
-                  ? { kind: 'sandbox' as const, image: pane.session.image }
-                  : { kind: 'host' as const, cwd: resolveCwd(project.root, pane.session.cwd), root: project.root };
-              const label = pane.session.kind === 'sandbox' ? pane.session.image : undefined;
+              const { session, label } = paneBacking(pane);
               return (
                 <div
                   key={pane.id}

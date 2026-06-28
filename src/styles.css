@@ -496,6 +496,77 @@ button {
   overflow-y: auto;
 }
 
+.sandbox-menu-wide {
+  min-width: 320px;
+  max-width: 380px;
+}
+
+.sandbox-run-form-stacked {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.sandbox-run-row {
+  display: flex;
+  gap: 6px;
+}
+
+.container-row {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+}
+
+.container-row-main {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.container-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #54607c;
+  flex: 0 0 auto;
+}
+
+.container-dot.running {
+  background: #4ec9a8;
+  box-shadow: 0 0 6px rgba(78, 201, 168, 0.6);
+}
+
+.container-name {
+  color: #e6edf7;
+  white-space: nowrap;
+}
+
+.container-image {
+  color: #7f8899;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.container-action {
+  flex: 0 0 auto;
+  width: 28px;
+  border: 1px solid #243150;
+  background: transparent;
+  color: #9aa7c2;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.container-action:hover {
+  background: #1a2540;
+  color: #e6edf7;
+}
+
 .sandbox-menu-note code {
   color: #c6d2ea;
 }

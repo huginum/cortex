@@ -30,23 +30,23 @@
 
 ## 5. Frontend: containers, custom command, context-aware split
 
-- [ ] 5.1 Pane session becomes a container reference (`{ kind: 'container', id, command? }`); migrate legacy sandbox-image panes (create/run a container from the image)
-- [ ] 5.2 Run dialog: pick/enter image, optional name, optional command → create + run + open a shell pane
-- [ ] 5.3 Containers list UI (running/stopped) with run / stop / remove and "open shell"
-- [ ] 5.4 Context-aware split: split a container pane → exec another shell in the same container; split a host pane → host shell
-- [ ] 5.5 "New" affordance: host shell / new container / shell into an existing running container
-- [ ] 5.6 Label container panes by name (and command when non-default)
+- [x] 5.1 Pane session becomes a container reference (`{ kind: 'container', id, command? }`); migrate legacy sandbox-image panes (create/run a container from the image)
+- [x] 5.2 Run dialog: pick/enter image, optional name, optional command → create + run + open a shell pane
+- [x] 5.3 Containers list UI (running/stopped) with run / stop / remove and "open shell"
+- [x] 5.4 Context-aware split: split a container pane → exec another shell in the same container; split a host pane → host shell
+- [x] 5.5 "New" affordance: host shell / new container / shell into an existing running container
+- [x] 5.6 Label container panes by name (and command when non-default)
 
 ## 6. Persistence & migration
 
-- [ ] 6.1 Persist a container pane's container reference (and command); host panes unchanged
-- [ ] 6.2 Reopen: restore a container pane by starting its container if needed and opening a fresh shell
-- [ ] 6.3 Reopen with a removed container reports unavailable for that pane without failing others
-- [ ] 6.4 Legacy layouts (host, and image-sandbox from the prior change) still load
+- [x] 6.1 Persist a container pane's container reference (and command); host panes unchanged
+- [x] 6.2 Reopen: restore a container pane by starting its container if needed and opening a fresh shell
+- [x] 6.3 Reopen with a removed container reports unavailable for that pane without failing others
+- [x] 6.4 Legacy layouts (host, and image-sandbox from the prior change) still load
 
 ## 7. Verification
 
-- [ ] 7.1 `cargo build`/`clippy` clean (incl. `cortex-init`), `tsc`/`vite` build, container/COW unit tests pass
+- [x] 7.1 `cargo build`/`clippy` clean (incl. `cortex-init`), `tsc`/`vite` build, container/COW unit tests pass
 - [ ] 7.2 (macOS dev) Create a container from `alpine`, run it, reach a shell; create a named container; run a custom command
 - [ ] 7.3 (macOS dev) Open a second shell into the same running container (and via split); confirm shared filesystem (a file made in one shell is visible in the other)
 - [ ] 7.4 (macOS dev) One shell exits without stopping the container; stop tears down all; remove deletes the rootfs; the image stays clean
