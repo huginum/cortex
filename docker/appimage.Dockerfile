@@ -8,9 +8,11 @@
 FROM ubuntu:26.04
 
 ARG DEBIAN_FRONTEND=noninteractive
+# Note: CARGO_TARGET_DIR is intentionally NOT set here — it is set only at
+# `docker run` time for the app build. Setting it during the image build would
+# redirect libkrun's cargo output away from its Makefile's expected ./target.
 ENV PATH="/root/.cargo/bin:/opt/zig:${PATH}" \
     LIBKRUN_LIB_DIR=/usr/local/lib64 \
-    CARGO_TARGET_DIR=/build \
     APPIMAGE_EXTRACT_AND_RUN=1
 
 # Toolchain + Tauri (WebKitGTK 4.1) + AppImage + libkrun build dependencies.
@@ -47,3 +49,14 @@ RUN git clone --depth 1 https://github.com/containers/libkrun /tmp/libkrun \
     && rm -rf /tmp/libkrun \
     && echo /usr/local/lib64 > /etc/ld.so.conf.d/libkrun.conf \
     && ldconfig
+
+# The agent build (build-agent.sh) cross-builds both guest arches; add the second
+# musl target. Placed last so it does not invalidate the libkrun/kernel layers.
+RUN rustup target add x86_64-unknown-linux-musl
+
+# The libghostty-vt wasm build (Tauri's beforeBuildCommand) requires Zig 0.15.x;
+# /opt/zig (0.13) is kept for cargo-zigbuild. Provide 0.15 via ZIG_015.
+RUN curl -fsSL https://ziglang.org/download/0.15.2/zig-aarch64-linux-0.15.2.tar.xz \
+      | tar -xJ -C /opt \
+    && mv /opt/zig-aarch64-linux-0.15.2 /opt/zig15
+ENV ZIG_015=/opt/zig15/zig
