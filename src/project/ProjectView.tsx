@@ -5,6 +5,7 @@ import {
   closePane,
   collectPanes,
   createPane,
+  createSandboxPane,
   firstPaneId,
   placeLayout,
   setRatio,
@@ -14,7 +15,13 @@ import {
   type PaneRect,
 } from './layout';
 import { saveLayout, type Project } from './projectApi';
-import { CloseIcon, PlusIcon, SplitColumnsIcon, SplitRowsIcon } from './icons';
+import { CloseIcon, CubeIcon, PlusIcon, SplitColumnsIcon, SplitRowsIcon } from './icons';
+import {
+  listSandboxRootfs,
+  sandboxSupport,
+  type RootfsEntry,
+  type SandboxSupport,
+} from '../sandbox/sandboxApi';
 
 type ProjectViewProps = {
   project: Project;
@@ -29,6 +36,9 @@ type Drag = { id: string; orientation: Orientation; region: PaneRect };
 export function ProjectView({ project, initialLayout, onClose }: ProjectViewProps) {
   const [layout, setLayout] = useState<Layout>(initialLayout);
   const [focusedPaneId, setFocusedPaneId] = useState<string | undefined>(() => firstPaneId(initialLayout));
+  const [sandboxMenuOpen, setSandboxMenuOpen] = useState(false);
+  const [support, setSupport] = useState<SandboxSupport | null>(null);
+  const [rootfsList, setRootfsList] = useState<RootfsEntry[]>([]);
   const skipNextSave = useRef(true);
   const rootRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<Drag | null>(null);
@@ -104,6 +114,30 @@ export function ProjectView({ project, initialLayout, onClose }: ProjectViewProp
     setLayout((current) => closePane(current, targetId));
   }
 
+  // Open (or close) the sandbox menu, refreshing host support and the available
+  // rootfs list each time it opens.
+  function toggleSandboxMenu() {
+    const next = !sandboxMenuOpen;
+    setSandboxMenuOpen(next);
+    if (next) {
+      void sandboxSupport().then(setSupport);
+      void listSandboxRootfs().then(setRootfsList);
+    }
+  }
+
+  // Add a sandbox pane booted from `rootfs`: the first pane when the project is
+  // empty, otherwise split off the focused pane — mirroring how host panes add.
+  function addSandbox(rootfs: string) {
+    const pane = createSandboxPane(rootfs);
+    if (!focusedPaneId) {
+      setLayout(pane);
+    } else {
+      setLayout((current) => splitPane(current, focusedPaneId, 'horizontal', pane));
+    }
+    setFocusedPaneId(pane.id);
+    setSandboxMenuOpen(false);
+  }
+
   const onDragMove = useCallback((event: PointerEvent) => {
     const drag = dragRef.current;
     const root = rootRef.current;
@@ -151,6 +185,39 @@ export function ProjectView({ project, initialLayout, onClose }: ProjectViewProp
           <button type="button" className="icon-button" title="New terminal" onClick={addTerminal}>
             <PlusIcon />
           </button>
+          <div className="sandbox-menu-anchor">
+            <button
+              type="button"
+              className={sandboxMenuOpen ? 'icon-button icon-button-active' : 'icon-button'}
+              title="New sandbox"
+              onClick={toggleSandboxMenu}
+            >
+              <CubeIcon />
+            </button>
+            {sandboxMenuOpen ? (
+              <div className="sandbox-menu" role="menu">
+                {support && !support.supported ? (
+                  <p className="sandbox-menu-note">{support.reason}</p>
+                ) : rootfsList.length === 0 ? (
+                  <p className="sandbox-menu-note">
+                    No prepared rootfs found. Add one under the app config <code>rootfs</code> directory.
+                  </p>
+                ) : (
+                  rootfsList.map((entry) => (
+                    <button
+                      key={entry.id}
+                      type="button"
+                      className="sandbox-menu-item"
+                      role="menuitem"
+                      onClick={() => addSandbox(entry.id)}
+                    >
+                      {entry.label}
+                    </button>
+                  ))
+                )}
+              </div>
+            ) : null}
+          </div>
           <button type="button" className="icon-button" title="Close project" onClick={onClose}>
             <CloseIcon />
           </button>
@@ -167,26 +234,33 @@ export function ProjectView({ project, initialLayout, onClose }: ProjectViewProp
           </div>
         ) : (
           <div className="layout-root" ref={rootRef}>
-            {panes.map(({ pane, rect }) => (
-              <div
-                key={pane.id}
-                className={pane.id === focusedPaneId ? 'layout-pane layout-pane-focused' : 'layout-pane'}
-                style={{
-                  left: `${rect.left}%`,
-                  top: `${rect.top}%`,
-                  width: `${rect.width}%`,
-                  height: `${rect.height}%`,
-                }}
-              >
-                <TerminalPane
-                  cwd={resolveCwd(project.root, pane.cwd)}
-                  root={project.root}
-                  focused={pane.id === focusedPaneId}
-                  onFocus={() => setFocusedPaneId(pane.id)}
-                  onExit={() => close(pane.id)}
-                />
-              </div>
-            ))}
+            {panes.map(({ pane, rect }) => {
+              const session =
+                pane.session.kind === 'sandbox'
+                  ? { kind: 'sandbox' as const, rootfs: pane.session.rootfs }
+                  : { kind: 'host' as const, cwd: resolveCwd(project.root, pane.session.cwd), root: project.root };
+              const label = pane.session.kind === 'sandbox' ? pane.session.rootfs : undefined;
+              return (
+                <div
+                  key={pane.id}
+                  className={pane.id === focusedPaneId ? 'layout-pane layout-pane-focused' : 'layout-pane'}
+                  style={{
+                    left: `${rect.left}%`,
+                    top: `${rect.top}%`,
+                    width: `${rect.width}%`,
+                    height: `${rect.height}%`,
+                  }}
+                >
+                  <TerminalPane
+                    session={session}
+                    label={label}
+                    focused={pane.id === focusedPaneId}
+                    onFocus={() => setFocusedPaneId(pane.id)}
+                    onExit={() => close(pane.id)}
+                  />
+                </div>
+              );
+            })}
             {dividers.map((divider) => (
               <div
                 key={divider.id}

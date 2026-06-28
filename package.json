@@ -12,6 +12,8 @@
     "tauri": "cargo tauri",
     "tauri:dev": "cargo tauri dev",
     "tauri:build": "cargo tauri build",
+    "sandbox:sign-dev": "sh scripts/codesign-dev.sh",
+    "dev:signed": "sh scripts/dev.sh",
     "ghostty:wasm": "node scripts/build-libghostty-wasm.mjs",
     "ghostty:verify": "node scripts/verify-libghostty-wasm.mjs",
     "docs:build": "antora antora-playbook.yml --stacktrace"

@@ -14,23 +14,31 @@ type TerminalOutputPayload = {
   data: number[];
 };
 
-export async function startLocalTerminal(
+/** What a terminal session is attached to. A host shell at a working directory,
+ *  or a sandbox microVM booted from a prepared rootfs (referenced by id). */
+export type SessionDescriptor =
+  | { kind: 'host'; cwd?: string; root?: string }
+  | { kind: 'sandbox'; rootfs: string };
+
+export async function startTerminalSession(
   cols: number,
   rows: number,
   pixelWidth: number,
   pixelHeight: number,
   onData: (data: Uint8Array) => void,
   onExit: () => void,
-  cwd?: string,
-  root?: string,
+  session: SessionDescriptor,
 ): Promise<TerminalTransport> {
+  const sessionArgs =
+    session.kind === 'sandbox'
+      ? { kind: 'sandbox', rootfs: session.rootfs }
+      : { cwd: session.cwd, root: session.root };
   const sessionId = await invoke<string>('start_terminal', {
     cols,
     rows,
     pixelWidth,
     pixelHeight,
-    cwd,
-    root,
+    ...sessionArgs,
   });
   const unlistenOutput = await listen<TerminalOutputPayload>('terminal-output', (event) => {
     if (event.payload.sessionId !== sessionId) return;
