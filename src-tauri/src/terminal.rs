@@ -11,7 +11,9 @@ use std::{
 
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
+
+use crate::sandbox;
 
 #[derive(Default)]
 pub struct TerminalManager {
@@ -61,8 +63,12 @@ impl serde::Serialize for TerminalError {
     }
 }
 
+/// The kind of process a terminal session drives. `kind` is `"sandbox"` for a
+/// microVM session and host-shell (the default) otherwise, so the existing
+/// frontend call — which omits it — keeps starting host shells unchanged.
 #[tauri::command]
 pub fn start_terminal(
+    app: AppHandle,
     manager: State<'_, TerminalManager>,
     cols: u16,
     rows: u16,
@@ -70,6 +76,8 @@ pub fn start_terminal(
     pixel_height: u16,
     cwd: Option<String>,
     root: Option<String>,
+    kind: Option<String>,
+    rootfs: Option<String>,
 ) -> Result<String, TerminalError> {
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -81,16 +89,10 @@ pub fn start_terminal(
         })
         .map_err(|error| TerminalError::Pty(error.to_string()))?;
 
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    let mut command = CommandBuilder::new(shell);
-    add_login_shell_arg(&mut command);
-    command.env("TERM", "xterm-256color");
-    command.env("COLORTERM", "truecolor");
-    command.env("TERM_PROGRAM", "Cortex");
-    command.env("PATH", terminal_path());
-    if let Some(dir) = resolve_cwd(cwd, root) {
-        command.cwd(dir);
-    }
+    let command = match kind.as_deref() {
+        Some("sandbox") => sandbox_command(&app, rootfs)?,
+        _ => host_shell_command(cwd, root),
+    };
 
     let child = pair
         .slave
@@ -216,6 +218,55 @@ fn resolve_cwd(cwd: Option<String>, root: Option<String>) -> Option<PathBuf> {
     }
 
     canonical_root.or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+}
+
+/// Build the command for a host-shell session (the original behavior).
+fn host_shell_command(cwd: Option<String>, root: Option<String>) -> CommandBuilder {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    let mut command = CommandBuilder::new(shell);
+    add_login_shell_arg(&mut command);
+    command.env("TERM", "xterm-256color");
+    command.env("COLORTERM", "truecolor");
+    command.env("TERM_PROGRAM", "Cortex");
+    command.env("PATH", terminal_path());
+    if let Some(dir) = resolve_cwd(cwd, root) {
+        command.cwd(dir);
+    }
+    command
+}
+
+/// Build the command for a sandbox session: Cortex re-executing itself as the
+/// libkrun helper for the rootfs identified by `rootfs` (a directory name under
+/// the app's `rootfs` config dir). Rejected when the host can't run sandboxes or
+/// the rootfs can't be resolved.
+fn sandbox_command(
+    app: &AppHandle,
+    rootfs: Option<String>,
+) -> Result<CommandBuilder, TerminalError> {
+    let support = sandbox::sandbox_support();
+    if !support.supported {
+        return Err(TerminalError::Pty(support.reason.unwrap_or_else(|| {
+            "Sandboxes are not supported on this host.".to_string()
+        })));
+    }
+
+    let rootfs_id =
+        rootfs.ok_or_else(|| TerminalError::Pty("missing rootfs for sandbox session".to_string()))?;
+    let dir = sandbox_rootfs_dir(app)?;
+    let path = sandbox::resolve_rootfs(&dir, &rootfs_id)
+        .ok_or_else(|| TerminalError::Pty(format!("rootfs not found: {rootfs_id}")))?;
+
+    sandbox::host_command(&sandbox::SandboxConfig::new(path))
+        .map_err(|error| TerminalError::Pty(error.to_string()))
+}
+
+/// The directory holding prepared rootfs entries, under the app config dir.
+fn sandbox_rootfs_dir(app: &AppHandle) -> Result<PathBuf, TerminalError> {
+    let dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| TerminalError::Pty(error.to_string()))?;
+    Ok(dir.join("rootfs"))
 }
 
 fn add_login_shell_arg(command: &mut CommandBuilder) {

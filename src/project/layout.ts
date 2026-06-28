@@ -1,15 +1,20 @@
-// The terminal layout for a project is a binary tree. A leaf is a pane with a
-// working directory relative to the repository root ('.' means the root). A
-// split arranges two children horizontally or vertically with a size ratio.
-// An empty project has a `null` layout (no panes).
+// The terminal layout for a project is a binary tree. A leaf is a pane backed by
+// a session: a host shell at a working directory relative to the repository root
+// ('.' means the root), or a sandbox shell in a microVM booted from a prepared
+// rootfs. A split arranges two children horizontally or vertically with a size
+// ratio. An empty project has a `null` layout (no panes).
 
 export type Orientation = 'horizontal' | 'vertical';
+
+/** What a pane's terminal is attached to. */
+export type PaneSession =
+  | { kind: 'host'; cwd: string }
+  | { kind: 'sandbox'; rootfs: string };
 
 export type PaneNode = {
   type: 'pane';
   id: string;
-  /** Working directory relative to the repository root. '.' is the root. */
-  cwd: string;
+  session: PaneSession;
 };
 
 export type SplitNode = {
@@ -39,8 +44,14 @@ export function newSplitId(): string {
   return `split-${nodeCounter}`;
 }
 
+/** A host-shell pane rooted at a repo-relative working directory. */
 export function createPane(cwd = '.'): PaneNode {
-  return { type: 'pane', id: newPaneId(), cwd };
+  return { type: 'pane', id: newPaneId(), session: { kind: 'host', cwd } };
+}
+
+/** A sandbox pane booting a microVM from the prepared rootfs `rootfs` (an id). */
+export function createSandboxPane(rootfs: string): PaneNode {
+  return { type: 'pane', id: newPaneId(), session: { kind: 'sandbox', rootfs } };
 }
 
 /** All panes in tree order. */
@@ -191,6 +202,16 @@ export function isLayoutNode(value: unknown): value is LayoutNode {
   if (typeof value !== 'object' || value === null) return false;
   const node = value as Record<string, unknown>;
   if (node.type === 'pane') {
+    // A pane is valid if it carries a session, or a legacy bare `cwd` (or
+    // neither, defaulting to the repo root). `hydrate` normalizes all three.
+    const session = node.session;
+    if (session !== undefined) {
+      if (typeof session !== 'object' || session === null) return false;
+      const s = session as Record<string, unknown>;
+      if (s.kind === 'sandbox') return typeof s.rootfs === 'string';
+      if (s.kind === 'host') return s.cwd === undefined || typeof s.cwd === 'string';
+      return false;
+    }
     return node.cwd === undefined || typeof node.cwd === 'string';
   }
   if (node.type === 'split') {
@@ -200,13 +221,30 @@ export function isLayoutNode(value: unknown): value is LayoutNode {
 }
 
 /**
+ * Normalize a persisted pane's session. A pane with a valid `session` keeps it; a
+ * legacy pane (bare `cwd`, no session) becomes a host-shell session — so layouts
+ * saved before sandboxes existed load unchanged, with no rewrite.
+ */
+function hydrateSession(node: Record<string, unknown>): PaneSession {
+  const session = node.session as Record<string, unknown> | undefined;
+  if (session?.kind === 'sandbox' && typeof session.rootfs === 'string') {
+    return { kind: 'sandbox', rootfs: session.rootfs };
+  }
+  if (session?.kind === 'host') {
+    return { kind: 'host', cwd: typeof session.cwd === 'string' && session.cwd ? session.cwd : '.' };
+  }
+  const legacyCwd = typeof node.cwd === 'string' && node.cwd ? node.cwd : '.';
+  return { kind: 'host', cwd: legacyCwd };
+}
+
+/**
  * Rebuild a persisted layout with fresh pane ids. The persisted document only
  * carries pane working directories and split structure — never live state — so
  * restoration spawns brand-new shells.
  */
 export function hydrate(node: LayoutNode): LayoutNode {
   if (node.type === 'pane') {
-    return { type: 'pane', id: newPaneId(), cwd: node.cwd || '.' };
+    return { type: 'pane', id: newPaneId(), session: hydrateSession(node as unknown as Record<string, unknown>) };
   }
   return {
     type: 'split',

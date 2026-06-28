@@ -8,6 +8,7 @@ Required tools:
 * Zig 0.15.x for building libghostty-vt WebAssembly
 * Antora CLI and site generator: `npm i -g @antora/cli@3.1 @antora/site-generator@3.1`
 * macOS Command Line Tools
+* libkrun (for microVM sandboxes) — see <<sandboxes>>
 
 Useful commands:
 
@@ -18,3 +19,60 @@ Useful commands:
 * `npm run docs:build`
 
 Ghostty currently requires Zig 0.15.x for the libghostty-vt build. If Homebrew installs it as keg-only, the build script looks for `/opt/homebrew/opt/zig@0.15/bin/zig` automatically.
+
+[#sandboxes]
+== MicroVM sandboxes (libkrun)
+
+Cortex runs sandbox terminals as microVMs by linking https://github.com/containers/libkrun[libkrun] directly. libkrun is a *build-time dependency*: the backend calls its C API, so it must be installed to compile Cortex.
+
+Sandboxes run on Apple Silicon macOS (Hypervisor.framework) and on Linux (KVM). They are not available on Intel Macs or Windows. Host shells are unaffected and need none of this.
+
+=== Install libkrun
+
+macOS (Apple Silicon):
+
+[source,sh]
+----
+brew tap libkrun/krun
+brew trust libkrun/krun       # the tap ships formulae that run code at install time
+brew install libkrun          # also installs libkrunfw (the guest kernel)
+----
+
+libkrun is keg-only; the build script resolves its location with `brew --prefix libkrun`. To use a non-Homebrew build, set `LIBKRUN_LIB_DIR` to the directory containing `libkrun.dylib`.
+
+Linux:
+
+* Install `libkrun` and `libkrunfw` (from your distribution or `make install`); set `LIBKRUN_LIB_DIR` if they are not on the default library path.
+* The user running Cortex needs access to `/dev/kvm` (add your user to the `kvm` group).
+
+=== macOS code signing (required for HVF)
+
+Hypervisor.framework refuses to start in a process that is not signed with the `com.apple.security.hypervisor` entitlement. The entitlements live in `src-tauri/Entitlements.plist` (hypervisor access, plus disabled library validation so the Homebrew libkrun/libkrunfw dylibs load under the hardened runtime).
+
+The GUI process itself does not need the entitlement — only the on-disk binary does, because the sandbox helper is a fresh `exec` of that binary (which the kernel evaluates against the file's signature). So sign the binary *while the app is running*, with no relaunch:
+
+[source,sh]
+----
+npm run tauri:dev          # terminal 1: builds and launches; leave it running
+npm run sandbox:sign-dev   # terminal 2: AFTER the window is up, sign target/debug/cortex
+----
+
+Then start a sandbox — the running app execs the freshly signed binary for the helper. Do **not** sign before `tauri:dev` or relaunch with it afterward: `tauri dev` recompiles and replaces (unsigns) the binary. Re-sign after any rebuild.
+
+To avoid the two-terminal dance, `npm run dev:signed` builds, signs, and runs the signed binary against the Vite dev server in one command.
+
+Release builds (`npm run tauri:build`) pick up `Entitlements.plist` from `tauri.conf.json`; set your Developer ID signing identity in the environment so the bundle is signed and notarizable.
+
+=== Prepare a rootfs
+
+v1 boots from a prepared root filesystem directory; it does not yet pull OCI images. Place each rootfs as a subdirectory of the `rootfs` folder in the app config directory:
+
+[source,sh]
+----
+# macOS
+~/Library/Application Support/com.huginum.cortex/rootfs/<name>/
+# Linux
+~/.config/com.huginum.cortex/rootfs/<name>/
+----
+
+Each `<name>` subdirectory is one bootable rootfs (it must contain the target executable, e.g. `/bin/sh`). The sandbox menu in the project toolbar lists these by name; selecting one opens a sandbox terminal pane booted from it.

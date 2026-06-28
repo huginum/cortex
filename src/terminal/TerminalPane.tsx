@@ -1,18 +1,18 @@
 import { useEffect, useRef, useState } from 'react';
 import type React from 'react';
 import { GhosttyVt, type TerminalMouseInput, type TerminalSnapshot } from './ghosttyVt';
-import { startLocalTerminal, type TerminalTransport } from './sessionTransport';
+import { startTerminalSession, type SessionDescriptor, type TerminalTransport } from './sessionTransport';
 import { drawTerminal, terminalGeometry } from './terminalCanvas';
 import { loadTerminalSettings, terminalStyle, type TerminalSettings } from './terminalSettings';
 
 type TerminalState = 'idle' | 'starting' | 'ready' | 'error' | 'exited';
 
 export type TerminalPaneProps = {
-  /** Working directory for the shell; defaults to the user's home when omitted. */
-  cwd?: string;
-  /** Repository root; the backend confines the shell's cwd to within it. */
-  root?: string;
-  /** Called when the shell process exits so the parent can close this pane. */
+  /** What this pane's terminal attaches to: a host shell or a sandbox microVM. */
+  session: SessionDescriptor;
+  /** Optional badge (e.g. the rootfs name) shown for a sandbox pane. */
+  label?: string;
+  /** Called when the session's process exits so the parent can close this pane. */
   onExit: () => void;
   /** Whether this pane currently holds input focus (used for highlighting). */
   focused?: boolean;
@@ -20,7 +20,7 @@ export type TerminalPaneProps = {
   onFocus?: () => void;
 };
 
-export function TerminalPane({ cwd, root, onExit, focused, onFocus }: TerminalPaneProps) {
+export function TerminalPane({ session, label, onExit, focused, onFocus }: TerminalPaneProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const screenRef = useRef<HTMLCanvasElement>(null);
   const ghosttyRef = useRef<GhosttyVt | null>(null);
@@ -97,7 +97,7 @@ export function TerminalPane({ cwd, root, onExit, focused, onFocus }: TerminalPa
       }
       ghosttyRef.current = ghostty;
 
-      const transport = await startLocalTerminal(
+      const transport = await startTerminalSession(
         cols,
         rows,
         pixelWidth,
@@ -111,8 +111,7 @@ export function TerminalPane({ cwd, root, onExit, focused, onFocus }: TerminalPa
           setState('exited');
           onExit();
         },
-        cwd,
-        root,
+        session,
       );
       if (cancelledRef.current) {
         // Unmounted while the backend session was being created; tear it down
@@ -395,10 +394,13 @@ export function TerminalPane({ cwd, root, onExit, focused, onFocus }: TerminalPa
         }}
         aria-label="Embedded terminal viewport"
       >
+        {label ? <span className="terminal-badge">{label}</span> : null}
         {hasFrame ? (
           <canvas ref={screenRef} className="terminal-screen" />
         ) : (
-          <div className="terminal-placeholder">Starting shell...</div>
+          <div className="terminal-placeholder">
+            {session.kind === 'sandbox' ? 'Starting sandbox...' : 'Starting shell...'}
+          </div>
         )}
       </div>
     </section>

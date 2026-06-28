@@ -50,6 +50,17 @@ export function PlusIcon(props: IconProps) {
   );
 }
 
+/** A box/cube — a microVM sandbox. */
+export function CubeIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M8 1.8l5.4 3.1v6.2L8 14.2l-5.4-3.1V4.9z" />
+      <path d="M2.6 4.9L8 8l5.4-3.1" />
+      <line x1="8" y1="8" x2="8" y2="14.2" />
+    </Svg>
+  );
+}
+
 export function CloseIcon(props: IconProps) {
   return (
     <Svg {...props}>
