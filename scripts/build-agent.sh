@@ -16,9 +16,10 @@ cd "$(dirname "$0")/../src-tauri"
 OUT="agent-bin"
 mkdir -p "$OUT"
 
+TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 for target in aarch64-unknown-linux-musl x86_64-unknown-linux-musl; do
   cargo zigbuild -p cortex-init --target "$target" --release
   arch="${target%%-*}"
-  cp "target/$target/release/cortex-init" "$OUT/cortex-init-$arch"
+  cp "$TARGET_DIR/$target/release/cortex-init" "$OUT/cortex-init-$arch"
   echo "Built $OUT/cortex-init-$arch"
 done

@@ -95,3 +95,16 @@ The script first builds the in-guest agent (`cortex-init`), which is bundled as 
 Building the agent needs the musl cross toolchain on the build host: `rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl`, `cargo install cargo-zigbuild`, and a Zig toolchain.
 
 Sandboxes on Linux require `/dev/kvm`: ensure KVM is enabled and your user is in the `kvm` group.
+
+=== Cross-building the AppImage from macOS
+
+To build the Linux AppImage without a Linux build setup — and keep the test machine clean — build it inside an arm64 Linux container:
+
+[source,sh]
+----
+npm run build:appimage:docker   # → ./dist-linux/*.AppImage
+----
+
+This requires Docker (or colima) able to run `linux/arm64` containers (native on Apple silicon). The builder image (`docker/appimage.Dockerfile`) is based on Ubuntu 26.04 to match the target machine's glibc, and compiles libkrun + libkrunfw from source. The source is mounted read-only and copied into the container, so the host tree is untouched. Copy the resulting `.AppImage` to the Ubuntu test machine (which needs only `/dev/kvm`).
+
+If your test machine runs a different distro/version, change the `FROM` in `docker/appimage.Dockerfile` to match (its glibc must be at least as old as the target's).
