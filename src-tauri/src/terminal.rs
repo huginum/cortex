@@ -1,6 +1,8 @@
 use std::{
     collections::HashMap,
     io::{Read, Write},
+    net::Shutdown,
+    os::unix::net::UnixStream,
     path::{Path, PathBuf},
     sync::{
         Mutex,
@@ -13,7 +15,7 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
-use crate::sandbox;
+use crate::{container_runtime::ContainerRuntime, sandbox};
 
 #[derive(Default)]
 pub struct TerminalManager {
@@ -21,7 +23,16 @@ pub struct TerminalManager {
     sessions: Mutex<HashMap<String, TerminalSession>>,
 }
 
-struct TerminalSession {
+/// A terminal session's backend. Host shells and direct image sandboxes run
+/// behind a host PTY; container shells stream over a vsock exec connection. Both
+/// share the same frontend transport, so only construction and the
+/// resize/write/exit mechanics differ.
+enum TerminalSession {
+    Pty(PtySession),
+    Exec(ExecSession),
+}
+
+struct PtySession {
     master: Box<dyn MasterPty + Send>,
     writer: Mutex<Box<dyn Write + Send>>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
@@ -29,6 +40,15 @@ struct TerminalSession {
     /// not begin until then, so no startup output is emitted before listeners
     /// are attached. `None` once streaming has started.
     reader: Mutex<Option<Box<dyn Read + Send>>>,
+}
+
+/// A shell exec'd into a running container, streamed over the agent's vsock
+/// socket using the framed protocol.
+struct ExecSession {
+    /// Write half: frames `Data` (input) and `Resize` to the guest agent.
+    writer: Mutex<UnixStream>,
+    /// Read half, taken by `subscribe` to drive the frame-reading thread.
+    reader: Mutex<Option<UnixStream>>,
 }
 
 #[derive(Serialize, Clone)]
@@ -71,6 +91,7 @@ impl serde::Serialize for TerminalError {
 pub fn start_terminal(
     app: AppHandle,
     manager: State<'_, TerminalManager>,
+    runtime: State<'_, ContainerRuntime>,
     cols: u16,
     rows: u16,
     pixel_width: u16,
@@ -79,34 +100,59 @@ pub fn start_terminal(
     root: Option<String>,
     kind: Option<String>,
     image: Option<String>,
+    container: Option<String>,
+    command: Option<String>,
 ) -> Result<String, TerminalError> {
-    let pty_system = native_pty_system();
-    let pair = pty_system
-        .openpty(PtySize {
-            rows,
-            cols,
-            pixel_width,
-            pixel_height,
-        })
-        .map_err(|error| TerminalError::Pty(error.to_string()))?;
-
-    let command = match kind.as_deref() {
-        Some("sandbox") => sandbox_command(&app, image)?,
-        _ => host_shell_command(cwd, root),
+    let session = match kind.as_deref() {
+        // A shell exec'd into a container: no host PTY; stream over the agent.
+        Some("container") => {
+            let id = container
+                .ok_or_else(|| TerminalError::Pty("missing container for session".to_string()))?;
+            let stream = crate::container_runtime::open_exec(&app, &runtime, &id, command, cols, rows)
+                .map_err(TerminalError::Pty)?;
+            let read_half = stream
+                .try_clone()
+                .map_err(|error| TerminalError::Pty(error.to_string()))?;
+            TerminalSession::Exec(ExecSession {
+                writer: Mutex::new(stream),
+                reader: Mutex::new(Some(read_half)),
+            })
+        }
+        // Host shell or direct image sandbox: behind a host PTY.
+        other => {
+            let pty_system = native_pty_system();
+            let pair = pty_system
+                .openpty(PtySize {
+                    rows,
+                    cols,
+                    pixel_width,
+                    pixel_height,
+                })
+                .map_err(|error| TerminalError::Pty(error.to_string()))?;
+            let command = match other {
+                Some("sandbox") => sandbox_command(&app, image)?,
+                _ => host_shell_command(cwd, root),
+            };
+            let child = pair
+                .slave
+                .spawn_command(command)
+                .map_err(|error| TerminalError::Pty(error.to_string()))?;
+            let reader = pair
+                .master
+                .try_clone_reader()
+                .map_err(|error| TerminalError::Pty(error.to_string()))?;
+            let writer = pair
+                .master
+                .take_writer()
+                .map_err(|error| TerminalError::Pty(error.to_string()))?;
+            TerminalSession::Pty(PtySession {
+                master: pair.master,
+                writer: Mutex::new(writer),
+                child: Mutex::new(child),
+                reader: Mutex::new(Some(reader)),
+            })
+        }
     };
-
-    let child = pair
-        .slave
-        .spawn_command(command)
-        .map_err(|error| TerminalError::Pty(error.to_string()))?;
-    let reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|error| TerminalError::Pty(error.to_string()))?;
-    let writer = pair
-        .master
-        .take_writer()
-        .map_err(|error| TerminalError::Pty(error.to_string()))?;
 
     let session_id = format!(
         "local-{}",
@@ -116,14 +162,7 @@ pub fn start_terminal(
     // The reader is parked on the session and only drained once the frontend
     // calls `subscribe_terminal`, after it has attached its listeners — so the
     // initial prompt (or a fast exit) is never emitted before anyone is
-    // listening, and the PTY buffers it in the meantime.
-    let session = TerminalSession {
-        master: pair.master,
-        writer: Mutex::new(writer),
-        child: Mutex::new(child),
-        reader: Mutex::new(Some(reader)),
-    };
-
+    // listening.
     manager
         .sessions
         .lock()
@@ -143,22 +182,43 @@ pub fn subscribe_terminal(
     manager: State<'_, TerminalManager>,
     session_id: String,
 ) -> Result<(), TerminalError> {
-    let reader = {
+    enum Source {
+        Pty(Box<dyn Read + Send>),
+        Exec(UnixStream),
+        Already,
+    }
+
+    let source = {
         let sessions = manager.sessions.lock().map_err(|_| TerminalError::Lock)?;
         let session = sessions
             .get(&session_id)
             .ok_or_else(|| TerminalError::MissingSession(session_id.clone()))?;
-        session
-            .reader
-            .lock()
-            .map_err(|_| TerminalError::Lock)?
-            .take()
-    };
-    let Some(mut reader) = reader else {
-        return Ok(());
+        match session {
+            TerminalSession::Pty(pty) => pty
+                .reader
+                .lock()
+                .map_err(|_| TerminalError::Lock)?
+                .take()
+                .map_or(Source::Already, Source::Pty),
+            TerminalSession::Exec(exec) => exec
+                .reader
+                .lock()
+                .map_err(|_| TerminalError::Lock)?
+                .take()
+                .map_or(Source::Already, Source::Exec),
+        }
     };
 
-    let output_session_id = session_id;
+    match source {
+        Source::Pty(reader) => spawn_pty_stream(app, session_id, reader),
+        Source::Exec(stream) => spawn_exec_stream(app, session_id, stream),
+        Source::Already => {}
+    }
+    Ok(())
+}
+
+/// Stream raw PTY bytes as `terminal-output`, emitting `terminal-exit` on EOF.
+fn spawn_pty_stream(app: AppHandle, session_id: String, mut reader: Box<dyn Read + Send>) {
     thread::spawn(move || {
         let mut buffer = [0_u8; 8192];
         loop {
@@ -168,7 +228,7 @@ pub fn subscribe_terminal(
                     let _ = app.emit(
                         "terminal-output",
                         TerminalOutput {
-                            session_id: output_session_id.clone(),
+                            session_id: session_id.clone(),
                             data: buffer[..read].to_vec(),
                         },
                     );
@@ -176,16 +236,32 @@ pub fn subscribe_terminal(
                 Err(_) => break,
             }
         }
-
-        let _ = app.emit(
-            "terminal-exit",
-            TerminalExit {
-                session_id: output_session_id,
-            },
-        );
+        let _ = app.emit("terminal-exit", TerminalExit { session_id });
     });
+}
 
-    Ok(())
+/// Decode the agent's framed stream: `Data` becomes `terminal-output`; `Exit` or
+/// EOF ends the session with `terminal-exit`.
+fn spawn_exec_stream(app: AppHandle, session_id: String, mut stream: UnixStream) {
+    thread::spawn(move || {
+        loop {
+            match agent_proto::read_frame(&mut stream) {
+                Ok((agent_proto::FrameKind::Data, payload)) => {
+                    let _ = app.emit(
+                        "terminal-output",
+                        TerminalOutput {
+                            session_id: session_id.clone(),
+                            data: payload,
+                        },
+                    );
+                }
+                Ok((agent_proto::FrameKind::Exit, _)) => break,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        let _ = app.emit("terminal-exit", TerminalExit { session_id });
+    });
 }
 
 /// Pick a working directory for a new shell, confined to the project repository.
@@ -320,11 +396,20 @@ pub fn write_terminal(
     let session = sessions
         .get(&session_id)
         .ok_or_else(|| TerminalError::MissingSession(session_id.clone()))?;
-    let mut writer = session.writer.lock().map_err(|_| TerminalError::Lock)?;
 
-    writer
-        .write_all(&data)
-        .map_err(|error| TerminalError::Pty(error.to_string()))
+    match session {
+        TerminalSession::Pty(pty) => {
+            let mut writer = pty.writer.lock().map_err(|_| TerminalError::Lock)?;
+            writer
+                .write_all(&data)
+                .map_err(|error| TerminalError::Pty(error.to_string()))
+        }
+        TerminalSession::Exec(exec) => {
+            let mut stream = exec.writer.lock().map_err(|_| TerminalError::Lock)?;
+            agent_proto::write_data(&mut *stream, &data)
+                .map_err(|error| TerminalError::Pty(error.to_string()))
+        }
+    }
 }
 
 #[tauri::command]
@@ -341,15 +426,22 @@ pub fn resize_terminal(
         .get(&session_id)
         .ok_or_else(|| TerminalError::MissingSession(session_id.clone()))?;
 
-    session
-        .master
-        .resize(PtySize {
-            rows,
-            cols,
-            pixel_width,
-            pixel_height,
-        })
-        .map_err(|error| TerminalError::Pty(error.to_string()))
+    match session {
+        TerminalSession::Pty(pty) => pty
+            .master
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width,
+                pixel_height,
+            })
+            .map_err(|error| TerminalError::Pty(error.to_string())),
+        TerminalSession::Exec(exec) => {
+            let mut stream = exec.writer.lock().map_err(|_| TerminalError::Lock)?;
+            agent_proto::write_resize(&mut *stream, &agent_proto::ResizeRequest { cols, rows })
+                .map_err(|error| TerminalError::Pty(error.to_string()))
+        }
+    }
 }
 
 #[tauri::command]
@@ -364,10 +456,22 @@ pub fn stop_terminal(
         .remove(&session_id)
         .ok_or_else(|| TerminalError::MissingSession(session_id.clone()))?;
 
-    let mut child = session.child.lock().map_err(|_| TerminalError::Lock)?;
-    child
-        .kill()
-        .map_err(|error| TerminalError::Pty(error.to_string()))
+    match session {
+        TerminalSession::Pty(pty) => {
+            let mut child = pty.child.lock().map_err(|_| TerminalError::Lock)?;
+            child
+                .kill()
+                .map_err(|error| TerminalError::Pty(error.to_string()))
+        }
+        // Closing the exec shell hangs up the connection; the container keeps
+        // running for its other shells (stop the container to tear it down).
+        TerminalSession::Exec(exec) => {
+            if let Ok(stream) = exec.writer.lock() {
+                let _ = stream.shutdown(Shutdown::Both);
+            }
+            Ok(())
+        }
+    }
 }
 
 #[cfg(all(test, unix))]
