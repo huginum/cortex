@@ -1,0 +1,15 @@
+[package]
+name = "cortex-init"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[[bin]]
+name = "cortex-init"
+path = "src/main.rs"
+
+[dependencies]
+agent-proto = { path = "../agent-proto" }
+libc = "0.2"
+nix = { version = "0.29", features = ["term", "process", "mount", "hostname", "signal", "fs"] }
+vsock = "0.5"

@@ -1,3 +1,4 @@
+pub mod containers;
 pub mod images;
 mod project;
 pub mod sandbox;
@@ -23,6 +24,49 @@ pub(crate) fn images_root(app: &tauri::AppHandle) -> Result<std::path::PathBuf, 
         .app_data_dir()
         .map(|dir| dir.join("images"))
         .map_err(|error| error.to_string())
+}
+
+/// The containers store directory, under the app data dir.
+pub(crate) fn containers_root(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|dir| dir.join("containers"))
+        .map_err(|error| error.to_string())
+}
+
+/// Create a container from a cached image (COW clone). The image must already be
+/// cached (the run flow pulls it first).
+#[tauri::command]
+fn create_container(
+    app: tauri::AppHandle,
+    image: String,
+    name: Option<String>,
+    command: Option<String>,
+) -> Result<containers::Container, containers::ContainerError> {
+    let images = images_root(&app).map_err(containers::ContainerError::Io)?;
+    let root = containers_root(&app).map_err(containers::ContainerError::Io)?;
+    let rootfs = images::cached_rootfs(&images, &image)
+        .ok_or_else(|| containers::ContainerError::ImageUnavailable(image.clone()))?;
+    containers::create(&root, &image, &rootfs, name, command)
+}
+
+/// List all containers.
+#[tauri::command]
+fn list_containers(app: tauri::AppHandle) -> Vec<containers::Container> {
+    match containers_root(&app) {
+        Ok(root) => containers::list(&root),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Remove a stopped container, deleting its rootfs.
+#[tauri::command]
+fn remove_container(
+    app: tauri::AppHandle,
+    id: String,
+) -> Result<(), containers::ContainerError> {
+    let root = containers_root(&app).map_err(containers::ContainerError::Io)?;
+    containers::remove(&root, &id)
 }
 
 /// Cached OCI images a sandbox can boot from, listed by `name:tag`.
@@ -80,6 +124,9 @@ pub fn run() {
             sandbox_support,
             list_images,
             pull_image,
+            create_container,
+            list_containers,
+            remove_container,
             quit_app,
         ])
         .run(tauri::generate_context!())

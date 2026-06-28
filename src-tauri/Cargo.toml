@@ -1,3 +1,7 @@
+[workspace]
+members = ["agent-proto", "cortex-init"]
+resolver = "2"
+
 [package]
 name = "cortex"
 version = "0.1.0"
