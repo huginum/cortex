@@ -20,7 +20,7 @@
 
 use std::{
     ffi::{CString, OsString},
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 use portable_pty::CommandBuilder;
@@ -125,19 +125,22 @@ pub fn host_command(config: &SandboxConfig) -> std::io::Result<CommandBuilder> {
     command.arg(config.vcpus.to_string());
     command.arg(config.ram_mib.to_string());
     command.arg(&config.command);
-    if let Some(path) = libkrunfw_search_path() {
-        command.env("DYLD_FALLBACK_LIBRARY_PATH", path);
+    if let Some((var, path)) = libkrun_library_env() {
+        command.env(var, path);
     }
     Ok(command)
 }
 
 /// libkrun `dlopen`s libkrunfw by leaf name, so the helper needs its directory on
-/// the dynamic loader's fallback path. On macOS the Homebrew keg is off the
-/// default search path; resolve it via `brew --prefix` and append the default
-/// fallback dirs. Returns `None` on Linux/other, where libkrunfw is normally on
-/// the system path already.
+/// the dynamic loader's search path. Returns the loader env var and value for the
+/// current platform, or `None` when the system path already suffices.
+///
+/// - macOS (dev): the Homebrew keg is off the default path; resolve it via
+///   `brew --prefix` into `DYLD_FALLBACK_LIBRARY_PATH`.
+/// - Linux (bundle): the embedded libraries sit next to the executable
+///   (`../lib`); prepend that to `LD_LIBRARY_PATH`.
 #[cfg(target_os = "macos")]
-fn libkrunfw_search_path() -> Option<String> {
+fn libkrun_library_env() -> Option<(&'static str, String)> {
     let output = std::process::Command::new("brew")
         .arg("--prefix")
         .arg("libkrunfw")
@@ -147,11 +150,25 @@ fn libkrunfw_search_path() -> Option<String> {
         return None;
     }
     let prefix = String::from_utf8(output.stdout).ok()?.trim().to_string();
-    (!prefix.is_empty()).then(|| format!("{prefix}/lib:/usr/local/lib:/usr/lib"))
+    (!prefix.is_empty())
+        .then(|| ("DYLD_FALLBACK_LIBRARY_PATH", format!("{prefix}/lib:/usr/local/lib:/usr/lib")))
 }
 
-#[cfg(not(target_os = "macos"))]
-fn libkrunfw_search_path() -> Option<String> {
+#[cfg(target_os = "linux")]
+fn libkrun_library_env() -> Option<(&'static str, String)> {
+    // Bundle layout: <appdir>/usr/bin/cortex and <appdir>/usr/lib/*.so.
+    let exe = std::env::current_exe().ok()?;
+    let lib_dir = exe.parent()?.parent()?.join("lib");
+    let bundled = lib_dir.to_string_lossy().into_owned();
+    let value = match std::env::var("LD_LIBRARY_PATH") {
+        Ok(existing) if !existing.is_empty() => format!("{bundled}:{existing}"),
+        _ => bundled,
+    };
+    Some(("LD_LIBRARY_PATH", value))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn libkrun_library_env() -> Option<(&'static str, String)> {
     None
 }
 
@@ -277,50 +294,6 @@ fn guest_env() -> GuestEnv {
     }
 }
 
-/// A prepared root filesystem a sandbox can boot from.
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct RootfsEntry {
-    /// Stable identifier (the directory name) recorded in saved layouts.
-    pub id: String,
-    /// Human-facing label for the picker.
-    pub label: String,
-    /// Absolute host path to the rootfs directory.
-    pub path: String,
-}
-
-/// List prepared rootfs directories under `<rootfs_dir>` (each immediate
-/// subdirectory is one rootfs). Returns an empty list when the directory is
-/// absent — the UI then simply offers nothing to launch.
-pub fn list_rootfs(rootfs_dir: &Path) -> Vec<RootfsEntry> {
-    let Ok(entries) = std::fs::read_dir(rootfs_dir) else {
-        return Vec::new();
-    };
-    let mut out: Vec<RootfsEntry> = entries
-        .flatten()
-        .filter(|e| e.path().is_dir())
-        .filter_map(|e| {
-            let name = e.file_name().into_string().ok()?;
-            Some(RootfsEntry {
-                id: name.clone(),
-                label: name,
-                path: e.path().to_string_lossy().into_owned(),
-            })
-        })
-        .collect();
-    out.sort_by(|a, b| a.label.cmp(&b.label));
-    out
-}
-
-/// Resolve a rootfs id (a directory name under `<rootfs_dir>`) to its absolute
-/// path, confined to `rootfs_dir` so a crafted id cannot escape it.
-pub fn resolve_rootfs(rootfs_dir: &Path, id: &str) -> Option<PathBuf> {
-    let candidate = rootfs_dir.join(id);
-    let canonical = candidate.canonicalize().ok()?;
-    let root = rootfs_dir.canonicalize().ok()?;
-    (canonical.starts_with(&root) && canonical.is_dir()).then_some(canonical)
-}
-
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod ffi {
     use std::os::raw::c_char;
@@ -346,30 +319,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lists_rootfs_directories_sorted() {
-        let base = std::env::temp_dir().join(format!("cortex-rootfs-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(base.join("beta")).unwrap();
-        std::fs::create_dir_all(base.join("alpha")).unwrap();
-        std::fs::write(base.join("not-a-dir"), b"x").unwrap();
-
-        let entries = list_rootfs(&base);
-        let labels: Vec<&str> = entries.iter().map(|e| e.label.as_str()).collect();
-        assert_eq!(labels, vec!["alpha", "beta"]);
-
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn resolve_rootfs_confines_to_base() {
-        let base = std::env::temp_dir().join(format!("cortex-rootfs-r-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(base.join("img")).unwrap();
-
-        assert!(resolve_rootfs(&base, "img").is_some());
-        assert!(resolve_rootfs(&base, "../..").is_none());
-        assert!(resolve_rootfs(&base, "missing").is_none());
-
-        let _ = std::fs::remove_dir_all(&base);
+    fn host_command_targets_the_helper() {
+        let config = SandboxConfig::new(PathBuf::from("/tmp/rootfs"));
+        let command = host_command(&config).unwrap();
+        let args: Vec<String> = command
+            .get_argv()
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.iter().any(|a| a == SANDBOX_HELPER_ARG));
+        assert!(args.iter().any(|a| a == "/tmp/rootfs"));
+        assert!(args.iter().any(|a| a == DEFAULT_COMMAND));
     }
 }

@@ -447,6 +447,55 @@ button {
   line-height: 1.4;
 }
 
+.sandbox-menu-error {
+  color: #f0a3a3;
+}
+
+.sandbox-run-form {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+}
+
+.sandbox-run-input {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  background: #0a1124;
+  border: 1px solid #243150;
+  border-radius: 6px;
+  color: #e6edf7;
+  font-size: 13px;
+}
+
+.sandbox-run-input:focus {
+  outline: none;
+  border-color: #3a4a72;
+}
+
+.sandbox-run-button {
+  padding: 5px 12px;
+  border: 1px solid #243150;
+  background: #1a2540;
+  color: #e6edf7;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.sandbox-run-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.sandbox-menu-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
 .sandbox-menu-note code {
   color: #c6d2ea;
 }

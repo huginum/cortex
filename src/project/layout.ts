@@ -9,7 +9,7 @@ export type Orientation = 'horizontal' | 'vertical';
 /** What a pane's terminal is attached to. */
 export type PaneSession =
   | { kind: 'host'; cwd: string }
-  | { kind: 'sandbox'; rootfs: string };
+  | { kind: 'sandbox'; image: string };
 
 export type PaneNode = {
   type: 'pane';
@@ -49,9 +49,9 @@ export function createPane(cwd = '.'): PaneNode {
   return { type: 'pane', id: newPaneId(), session: { kind: 'host', cwd } };
 }
 
-/** A sandbox pane booting a microVM from the prepared rootfs `rootfs` (an id). */
-export function createSandboxPane(rootfs: string): PaneNode {
-  return { type: 'pane', id: newPaneId(), session: { kind: 'sandbox', rootfs } };
+/** A sandbox pane booting a microVM from the OCI image `image` (a reference). */
+export function createSandboxPane(image: string): PaneNode {
+  return { type: 'pane', id: newPaneId(), session: { kind: 'sandbox', image } };
 }
 
 /** All panes in tree order. */
@@ -208,7 +208,7 @@ export function isLayoutNode(value: unknown): value is LayoutNode {
     if (session !== undefined) {
       if (typeof session !== 'object' || session === null) return false;
       const s = session as Record<string, unknown>;
-      if (s.kind === 'sandbox') return typeof s.rootfs === 'string';
+      if (s.kind === 'sandbox') return typeof s.image === 'string' || typeof s.rootfs === 'string';
       if (s.kind === 'host') return s.cwd === undefined || typeof s.cwd === 'string';
       return false;
     }
@@ -227,8 +227,11 @@ export function isLayoutNode(value: unknown): value is LayoutNode {
  */
 function hydrateSession(node: Record<string, unknown>): PaneSession {
   const session = node.session as Record<string, unknown> | undefined;
-  if (session?.kind === 'sandbox' && typeof session.rootfs === 'string') {
-    return { kind: 'sandbox', rootfs: session.rootfs };
+  if (session?.kind === 'sandbox') {
+    // Prefer the image reference; map a legacy `rootfs` id to a reference so a
+    // sandbox pane saved before image-fetching still resolves on reopen.
+    if (typeof session.image === 'string') return { kind: 'sandbox', image: session.image };
+    if (typeof session.rootfs === 'string') return { kind: 'sandbox', image: session.rootfs };
   }
   if (session?.kind === 'host') {
     return { kind: 'host', cwd: typeof session.cwd === 'string' && session.cwd ? session.cwd : '.' };

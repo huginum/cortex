@@ -18,7 +18,7 @@ type TerminalOutputPayload = {
  *  or a sandbox microVM booted from a prepared rootfs (referenced by id). */
 export type SessionDescriptor =
   | { kind: 'host'; cwd?: string; root?: string }
-  | { kind: 'sandbox'; rootfs: string };
+  | { kind: 'sandbox'; image: string };
 
 export async function startTerminalSession(
   cols: number,
@@ -31,7 +31,7 @@ export async function startTerminalSession(
 ): Promise<TerminalTransport> {
   const sessionArgs =
     session.kind === 'sandbox'
-      ? { kind: 'sandbox', rootfs: session.rootfs }
+      ? { kind: 'sandbox', image: session.image }
       : { cwd: session.cwd, root: session.root };
   const sessionId = await invoke<string>('start_terminal', {
     cols,

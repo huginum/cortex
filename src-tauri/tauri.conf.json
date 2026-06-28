@@ -34,6 +34,14 @@
     "license": "Apache-2.0",
     "macOS": {
       "entitlements": "Entitlements.plist"
+    },
+    "linux": {
+      "appimage": {
+        "files": {
+          "usr/lib/libkrun.so.1": "appimage-libs/libkrun.so.1",
+          "usr/lib/libkrunfw.so.5": "appimage-libs/libkrunfw.so.5"
+        }
+      }
     }
   }
 }

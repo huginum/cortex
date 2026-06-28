@@ -17,9 +17,11 @@ import {
 import { saveLayout, type Project } from './projectApi';
 import { CloseIcon, CubeIcon, PlusIcon, SplitColumnsIcon, SplitRowsIcon } from './icons';
 import {
-  listSandboxRootfs,
+  listImages,
+  onPullProgress,
+  pullImage,
   sandboxSupport,
-  type RootfsEntry,
+  type ImageEntry,
   type SandboxSupport,
 } from '../sandbox/sandboxApi';
 
@@ -38,7 +40,10 @@ export function ProjectView({ project, initialLayout, onClose }: ProjectViewProp
   const [focusedPaneId, setFocusedPaneId] = useState<string | undefined>(() => firstPaneId(initialLayout));
   const [sandboxMenuOpen, setSandboxMenuOpen] = useState(false);
   const [support, setSupport] = useState<SandboxSupport | null>(null);
-  const [rootfsList, setRootfsList] = useState<RootfsEntry[]>([]);
+  const [images, setImages] = useState<ImageEntry[]>([]);
+  const [imageInput, setImageInput] = useState('');
+  const [pulling, setPulling] = useState<{ reference: string; phase: string } | null>(null);
+  const [pullError, setPullError] = useState<string | null>(null);
   const skipNextSave = useRef(true);
   const rootRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<Drag | null>(null);
@@ -114,21 +119,22 @@ export function ProjectView({ project, initialLayout, onClose }: ProjectViewProp
     setLayout((current) => closePane(current, targetId));
   }
 
-  // Open (or close) the sandbox menu, refreshing host support and the available
-  // rootfs list each time it opens.
+  // Open (or close) the sandbox menu, refreshing host support and the cached
+  // image list each time it opens.
   function toggleSandboxMenu() {
     const next = !sandboxMenuOpen;
     setSandboxMenuOpen(next);
     if (next) {
+      setPullError(null);
       void sandboxSupport().then(setSupport);
-      void listSandboxRootfs().then(setRootfsList);
+      void listImages().then(setImages);
     }
   }
 
-  // Add a sandbox pane booted from `rootfs`: the first pane when the project is
+  // Open a sandbox pane booted from `image`: the first pane when the project is
   // empty, otherwise split off the focused pane — mirroring how host panes add.
-  function addSandbox(rootfs: string) {
-    const pane = createSandboxPane(rootfs);
+  function openSandboxPane(image: string) {
+    const pane = createSandboxPane(image);
     if (!focusedPaneId) {
       setLayout(pane);
     } else {
@@ -136,6 +142,29 @@ export function ProjectView({ project, initialLayout, onClose }: ProjectViewProp
     }
     setFocusedPaneId(pane.id);
     setSandboxMenuOpen(false);
+  }
+
+  // Run a container: ensure the image is cached (pulling with progress), then
+  // open a sandbox pane. A pull failure is reported without opening a pane.
+  async function runImage(reference: string) {
+    const ref = reference.trim();
+    if (!ref || pulling) return;
+    setPullError(null);
+    setPulling({ reference: ref, phase: 'starting' });
+    const unlisten = await onPullProgress((progress) =>
+      setPulling({ reference: ref, phase: progress.phase }),
+    );
+    try {
+      await pullImage(ref);
+      openSandboxPane(ref);
+      setImageInput('');
+      void listImages().then(setImages);
+    } catch (error) {
+      setPullError(String(error));
+    } finally {
+      unlisten();
+      setPulling(null);
+    }
   }
 
   const onDragMove = useCallback((event: PointerEvent) => {
@@ -198,22 +227,61 @@ export function ProjectView({ project, initialLayout, onClose }: ProjectViewProp
               <div className="sandbox-menu" role="menu">
                 {support && !support.supported ? (
                   <p className="sandbox-menu-note">{support.reason}</p>
-                ) : rootfsList.length === 0 ? (
-                  <p className="sandbox-menu-note">
-                    No prepared rootfs found. Add one under the app config <code>rootfs</code> directory.
-                  </p>
                 ) : (
-                  rootfsList.map((entry) => (
-                    <button
-                      key={entry.id}
-                      type="button"
-                      className="sandbox-menu-item"
-                      role="menuitem"
-                      onClick={() => addSandbox(entry.id)}
+                  <>
+                    <form
+                      className="sandbox-run-form"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        void runImage(imageInput);
+                      }}
                     >
-                      {entry.label}
-                    </button>
-                  ))
+                      <input
+                        className="sandbox-run-input"
+                        placeholder="image, e.g. ubuntu:24.04"
+                        value={imageInput}
+                        onChange={(event) => setImageInput(event.target.value)}
+                        disabled={!!pulling}
+                        // eslint-disable-next-line jsx-a11y/no-autofocus
+                        autoFocus
+                      />
+                      <button
+                        type="submit"
+                        className="sandbox-run-button"
+                        disabled={!!pulling || !imageInput.trim()}
+                      >
+                        Run
+                      </button>
+                    </form>
+                    {pulling ? (
+                      <p className="sandbox-menu-note">
+                        Pulling {pulling.reference} — {pulling.phase}…
+                      </p>
+                    ) : null}
+                    {pullError ? (
+                      <p className="sandbox-menu-note sandbox-menu-error">{pullError}</p>
+                    ) : null}
+                    {images.length > 0 ? (
+                      <div className="sandbox-menu-list">
+                        {images.map((image) => (
+                          <button
+                            key={image.reference}
+                            type="button"
+                            className="sandbox-menu-item"
+                            role="menuitem"
+                            onClick={() => void runImage(image.reference)}
+                            disabled={!!pulling}
+                          >
+                            {image.label}
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="sandbox-menu-note">
+                        No images yet. Type a reference above to fetch and run one.
+                      </p>
+                    )}
+                  </>
                 )}
               </div>
             ) : null}
@@ -237,9 +305,9 @@ export function ProjectView({ project, initialLayout, onClose }: ProjectViewProp
             {panes.map(({ pane, rect }) => {
               const session =
                 pane.session.kind === 'sandbox'
-                  ? { kind: 'sandbox' as const, rootfs: pane.session.rootfs }
+                  ? { kind: 'sandbox' as const, image: pane.session.image }
                   : { kind: 'host' as const, cwd: resolveCwd(project.root, pane.session.cwd), root: project.root };
-              const label = pane.session.kind === 'sandbox' ? pane.session.rootfs : undefined;
+              const label = pane.session.kind === 'sandbox' ? pane.session.image : undefined;
               return (
                 <div
                   key={pane.id}

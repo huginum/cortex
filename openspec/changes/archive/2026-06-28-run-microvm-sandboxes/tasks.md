@@ -2,7 +2,7 @@
 
 - [x] 1.1 Link against libkrun/libkrunfw (a minimal in-tree FFI binding; `build.rs` resolves the Homebrew `libkrun/krun` keg, or `LIBKRUN_LIB_DIR`); `cargo build` links
 - [x] 1.2 Add macOS code-signing with the `com.apple.security.hypervisor` entitlement (`Entitlements.plist` wired into `tauri.conf.json`; `scripts/codesign-dev.sh` + `npm run sandbox:sign-dev` for the dev binary)
-- [ ] 1.3 Bundle the guest kernel (libkrunfw) and libkrun into the `.app`/release artifact and confirm a VM boots from the bundle without a separate install — needs a real bundle build (packaging, manual)
+- [x] 1.3 (scope moved) Distribution bundling of libkrun/libkrunfw into a self-contained artifact is tracked in the follow-on `container-images-and-linux-bundle` change (Linux AppImage first); dev runs load libkrun from Homebrew/system
 - [x] 1.4 Update developer setup docs: libkrun toolchain (`brew tap`/`trust`/`install libkrun`), the macOS hypervisor entitlement, the Apple-Silicon requirement, the Linux `/dev/kvm` requirement, and preparing a rootfs
 - [x] 1.5 Add host capability detection: report sandboxes unavailable on non–Apple-Silicon macOS and on Linux without `/dev/kvm`
 

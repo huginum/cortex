@@ -11,7 +11,7 @@ use std::{
 
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 
 use crate::sandbox;
 
@@ -67,6 +67,7 @@ impl serde::Serialize for TerminalError {
 /// microVM session and host-shell (the default) otherwise, so the existing
 /// frontend call — which omits it — keeps starting host shells unchanged.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri commands take flat positional args.
 pub fn start_terminal(
     app: AppHandle,
     manager: State<'_, TerminalManager>,
@@ -77,7 +78,7 @@ pub fn start_terminal(
     cwd: Option<String>,
     root: Option<String>,
     kind: Option<String>,
-    rootfs: Option<String>,
+    image: Option<String>,
 ) -> Result<String, TerminalError> {
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -90,7 +91,7 @@ pub fn start_terminal(
         .map_err(|error| TerminalError::Pty(error.to_string()))?;
 
     let command = match kind.as_deref() {
-        Some("sandbox") => sandbox_command(&app, rootfs)?,
+        Some("sandbox") => sandbox_command(&app, image)?,
         _ => host_shell_command(cwd, root),
     };
 
@@ -236,12 +237,12 @@ fn host_shell_command(cwd: Option<String>, root: Option<String>) -> CommandBuild
 }
 
 /// Build the command for a sandbox session: Cortex re-executing itself as the
-/// libkrun helper for the rootfs identified by `rootfs` (a directory name under
-/// the app's `rootfs` config dir). Rejected when the host can't run sandboxes or
-/// the rootfs can't be resolved.
+/// libkrun helper for the cached rootfs of the OCI image `image`. The image must
+/// already be present in the cache (the frontend pulls it first); rejected when
+/// the host can't run sandboxes or the image isn't cached.
 fn sandbox_command(
     app: &AppHandle,
-    rootfs: Option<String>,
+    image: Option<String>,
 ) -> Result<CommandBuilder, TerminalError> {
     let support = sandbox::sandbox_support();
     if !support.supported {
@@ -250,23 +251,14 @@ fn sandbox_command(
         })));
     }
 
-    let rootfs_id =
-        rootfs.ok_or_else(|| TerminalError::Pty("missing rootfs for sandbox session".to_string()))?;
-    let dir = sandbox_rootfs_dir(app)?;
-    let path = sandbox::resolve_rootfs(&dir, &rootfs_id)
-        .ok_or_else(|| TerminalError::Pty(format!("rootfs not found: {rootfs_id}")))?;
+    let reference =
+        image.ok_or_else(|| TerminalError::Pty("missing image for sandbox session".to_string()))?;
+    let root = crate::images_root(app).map_err(TerminalError::Pty)?;
+    let path = crate::images::cached_rootfs(&root, &reference)
+        .ok_or_else(|| TerminalError::Pty(format!("image not prepared: {reference}")))?;
 
     sandbox::host_command(&sandbox::SandboxConfig::new(path))
         .map_err(|error| TerminalError::Pty(error.to_string()))
-}
-
-/// The directory holding prepared rootfs entries, under the app config dir.
-fn sandbox_rootfs_dir(app: &AppHandle) -> Result<PathBuf, TerminalError> {
-    let dir = app
-        .path()
-        .app_config_dir()
-        .map_err(|error| TerminalError::Pty(error.to_string()))?;
-    Ok(dir.join("rootfs"))
 }
 
 fn add_login_shell_arg(command: &mut CommandBuilder) {
