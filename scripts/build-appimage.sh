@@ -10,6 +10,10 @@
 # (LD_LIBRARY_PATH -> the bundled lib dir); see sandbox.rs.
 set -eu
 
+# Build the in-guest agent first; it is bundled as a resource (agent-bin/*) and
+# injected into containers at runtime.
+sh "$(dirname "$0")/build-agent.sh"
+
 STAGE="src-tauri/appimage-libs"
 mkdir -p "$STAGE"
 
