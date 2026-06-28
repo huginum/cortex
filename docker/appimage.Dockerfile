@@ -9,7 +9,7 @@ FROM ubuntu:26.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ENV PATH="/root/.cargo/bin:/opt/zig:${PATH}" \
-    LIBKRUN_LIB_DIR=/usr/local/lib \
+    LIBKRUN_LIB_DIR=/usr/local/lib64 \
     CARGO_TARGET_DIR=/build \
     APPIMAGE_EXTRACT_AND_RUN=1
 
@@ -18,7 +18,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl git xz-utils file rsync pkg-config build-essential \
       libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libssl-dev \
       libayatana-appindicator3-dev libfuse2t64 \
-      patchelf python3 flex bison bc libelf-dev cpio kmod gettext \
+      patchelf python3 python3-pyelftools flex bison bc libelf-dev cpio kmod gettext \
+      clang libclang-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Rust + the musl target for the static guest agent.
@@ -44,4 +45,5 @@ RUN git clone --depth 1 https://github.com/containers/libkrun /tmp/libkrun \
     && make -C /tmp/libkrun -j"$(nproc)" \
     && make -C /tmp/libkrun install \
     && rm -rf /tmp/libkrun \
+    && echo /usr/local/lib64 > /etc/ld.so.conf.d/libkrun.conf \
     && ldconfig
